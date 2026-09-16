@@ -1,0 +1,15 @@
+[Unit]
+Description=Distributed VRAM GPU Metrics Exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vram-exporter
+Group=vram-exporter
+ExecStart=/usr/local/bin/gpu-exporter
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
