@@ -1,0 +1,17 @@
+[Unit]
+Description=vLLM Inference Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vllm
+Group=vllm
+WorkingDirectory=/opt/vllm
+ExecStart=/opt/vllm/.venv/bin/vllm serve --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+Environment="CUDA_VISIBLE_DEVICES=0"
+
+[Install]
+WantedBy=multi-user.target

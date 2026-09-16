@@ -29,10 +29,8 @@ docs/superpowers/
 config/gateway.toml
 
 # Binary
-cmd/gateway/gateway
-cmd/gpu-exporter/gpu-exporter
-gateway
-gpu-exporter
+/gateway
+/gpu-exporter
 
 # Go
 *.exe
