@@ -3,6 +3,7 @@ package gpumetrics
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -70,5 +71,45 @@ func TestExporterHandler(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestExporterHandlerContentType(t *testing.T) {
+	collector := NewCollector(func() (GPUMetrics, error) {
+		return GPUMetrics{MemoryUsed: 100}, nil
+	})
+	handler := makeHandler(collector)
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	ct := w.Header().Get("Content-Type")
+	if ct != "text/plain; version=0.0.4" {
+		t.Errorf("Content-Type = %q, want %q", ct, "text/plain; version=0.0.4")
+	}
+}
+
+func TestExporterHealthEndpoint(t *testing.T) {
+	collector := NewCollector(func() (GPUMetrics, error) {
+		return GPUMetrics{}, nil
+	})
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", makeHandler(collector))
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "ok")
+	})
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "ok") {
+		t.Errorf("body = %q, want ok", w.Body.String())
 	}
 }
