@@ -215,6 +215,124 @@ func TestScrapeMetricsPartialFields(t *testing.T) {
 	}
 }
 
+func TestMonitorGPUFieldsPopulated(t *testing.T) {
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vllm.Close()
+
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("gpu_memory_used_bytes 1073741824\ngpu_memory_total_bytes 8589934592\ngpu_utilization_percent 65\ngpu_temperature_celsius 58\n"))
+	}))
+	defer metrics.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			HealthInterval:      100 * time.Millisecond,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "gpu-node", VLLMPort: extractPort(vllm.URL), MetricsPort: extractPort(metrics.URL)},
+		},
+	}
+
+	mon := NewMonitor(cfg)
+	mon.Start()
+	defer mon.Stop()
+
+	time.Sleep(250 * time.Millisecond)
+
+	states := mon.GetNodeStates()
+	if len(states) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(states))
+	}
+
+	s := states[0]
+	if s.GPUMemoryUsed != 1073741824 {
+		t.Errorf("GPUMemoryUsed = %d, want 1073741824", s.GPUMemoryUsed)
+	}
+	if s.GPUMemoryTotal != 8589934592 {
+		t.Errorf("GPUMemoryTotal = %d, want 8589934592", s.GPUMemoryTotal)
+	}
+	if s.GPUUtilization != 65 {
+		t.Errorf("GPUUtilization = %d, want 65", s.GPUUtilization)
+	}
+	if s.GPUTemperature != 58 {
+		t.Errorf("GPUTemperature = %d, want 58", s.GPUTemperature)
+	}
+}
+
+func TestMonitorResetsFailuresOnRecovery(t *testing.T) {
+	failCount := 0
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		failCount++
+		if failCount <= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vllm.Close()
+
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("gpu_memory_used_bytes 100\n"))
+	}))
+	defer metrics.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			HealthInterval:      50 * time.Millisecond,
+			HealthFailThreshold: 5,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "recover-node", VLLMPort: extractPort(vllm.URL), MetricsPort: extractPort(metrics.URL)},
+		},
+	}
+
+	mon := NewMonitor(cfg)
+	mon.Start()
+	defer mon.Stop()
+
+	// Wait for failures + recovery
+	time.Sleep(400 * time.Millisecond)
+
+	states := mon.GetNodeStates()
+	if len(states) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(states))
+	}
+
+	if states[0].Status != Healthy {
+		t.Errorf("status = %v, want Healthy after recovery", states[0].Status)
+	}
+	if states[0].ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d, want 0 after recovery", states[0].ConsecutiveFailures)
+	}
+}
+
+func TestNewMonitorNodesStartHealthy(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1", VLLMPort: 8000, MetricsPort: 9100},
+			{IP: "10.0.0.2", Name: "node-2", VLLMPort: 8000, MetricsPort: 9100},
+		},
+	}
+
+	mon := NewMonitor(cfg)
+	states := mon.GetNodeStates()
+
+	if len(states) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(states))
+	}
+	for _, s := range states {
+		if s.Status != Healthy {
+			t.Errorf("node %s initial status = %v, want Healthy", s.Name, s.Status)
+		}
+	}
+}
+
 func extractPort(url string) int {
 	// Extract port from httptest.Server URL like "http://127.0.0.1:PORT"
 	for i := len(url) - 1; i >= 0; i-- {
