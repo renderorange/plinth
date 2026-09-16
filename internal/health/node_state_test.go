@@ -30,6 +30,38 @@ func TestNodeStatusTransitions(t *testing.T) {
 	}
 }
 
+func TestStatusString(t *testing.T) {
+	tests := []struct {
+		status Status
+		want   string
+	}{
+		{Healthy, "healthy"},
+		{Degraded, "degraded"},
+		{Dead, "dead"},
+		{Status(99), "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			got := tt.status.String()
+			if got != tt.want {
+				t.Errorf("Status(%d).String() = %q, want %q", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestComputeStatusThresholdZero(t *testing.T) {
+	// threshold=0: consecutiveFailures >= 0 is always true → Dead
+	got := computeStatus(0, 0)
+	if got != Dead {
+		t.Errorf("computeStatus(0, 0) = %v, want Dead", got)
+	}
+	got = computeStatus(1, 0)
+	if got != Dead {
+		t.Errorf("computeStatus(1, 0) = %v, want Dead", got)
+	}
+}
+
 func TestNodeStateTimestamp(t *testing.T) {
 	n := NodeState{
 		IP:        "10.0.0.1",
