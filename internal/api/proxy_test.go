@@ -82,6 +82,61 @@ func TestProxyRequest_InvalidHost(t *testing.T) {
 	proxyRequest(rec, req, "256.256.256.256", 80, "/test")
 }
 
+func TestProxyRequest_ForwardsHeaders(t *testing.T) {
+	var receivedContentType string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedContentType = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	port := extractPort(t, backend.URL)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	proxyRequest(rec, req, "127.0.0.1", port, "/v1/chat/completions")
+
+	if receivedContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", receivedContentType)
+	}
+}
+
+func TestProxyRequest_PathForwarded(t *testing.T) {
+	var receivedPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	port := extractPort(t, backend.URL)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/completions", nil)
+
+	proxyRequest(rec, req, "127.0.0.1", port, "/v1/completions")
+
+	if receivedPath != "/v1/completions" {
+		t.Errorf("path = %q, want /v1/completions", receivedPath)
+	}
+}
+
+func TestProxyRequest_InvalidHostReturnsError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+
+	// Invalid host should cause proxy to error (though httputil may not set status)
+	proxyRequest(rec, req, "256.256.256.256", 80, "/test")
+
+	// The reverse proxy may return 502 or 500 on connection failure
+	// At minimum, verify it doesn't panic
+	if rec.Code == http.StatusOK {
+		t.Error("expected non-200 for invalid host, got 200")
+	}
+}
+
 func TestProxyRequest_BodyPreserved(t *testing.T) {
 	payload := `{"model":"llama","messages":[{"role":"user","content":"hi"}]}`
 	body := io.NopCloser(bytes.NewReader([]byte(payload)))
