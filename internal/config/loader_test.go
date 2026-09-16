@@ -101,6 +101,84 @@ default = "test/model"
 			toml:    "",
 			wantErr: true,
 		},
+		{
+			name: "zero nodes",
+			toml: `
+[cluster]
+name = "test-cluster"
+
+[gateway]
+listen = ":9000"
+metrics_listen = ":9091"
+health_interval = "5s"
+health_fail_threshold = 2
+
+[models]
+default = "test/model"
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if len(cfg.Nodes) != 0 {
+					t.Errorf("nodes count = %d, want 0", len(cfg.Nodes))
+				}
+			},
+		},
+		{
+			name: "multiple models",
+			toml: `
+[cluster]
+name = "test-cluster"
+
+[gateway]
+listen = ":9000"
+metrics_listen = ":9091"
+health_interval = "5s"
+health_fail_threshold = 2
+
+[models]
+default = "model-a"
+
+[[models.available]]
+name = "model-a"
+pipeline_stages = 1
+
+[[models.available]]
+name = "model-b"
+pipeline_stages = 2
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if len(cfg.Models.Available) != 2 {
+					t.Fatalf("models count = %d, want 2", len(cfg.Models.Available))
+				}
+				if cfg.Models.Available[0].Name != "model-a" {
+					t.Errorf("model[0] = %q, want model-a", cfg.Models.Available[0].Name)
+				}
+				if cfg.Models.Available[1].Name != "model-b" {
+					t.Errorf("model[1] = %q, want model-b", cfg.Models.Available[1].Name)
+				}
+				if cfg.Models.Available[1].PipelineStages != 2 {
+					t.Errorf("model[1].pipeline_stages = %d, want 2", cfg.Models.Available[1].PipelineStages)
+				}
+			},
+		},
+		{
+			name: "invalid health_interval format",
+			toml: `
+[cluster]
+name = "test-cluster"
+
+[gateway]
+listen = ":9000"
+metrics_listen = ":9091"
+health_interval = "5"
+health_fail_threshold = 2
+
+[models]
+default = "test/model"
+`,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
