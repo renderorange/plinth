@@ -9,6 +9,22 @@ import (
 	"distributed-vram/internal/config"
 )
 
+func waitForCondition(t *testing.T, timeout time.Duration, desc string, check func() bool) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		if check() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", desc)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestMonitorChecksNodes(t *testing.T) {
 	// Fake vLLM health endpoint
 	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,8 +53,10 @@ func TestMonitorChecksNodes(t *testing.T) {
 	mon.Start()
 	defer mon.Stop()
 
-	// Wait for at least one check cycle
-	time.Sleep(200 * time.Millisecond)
+	waitForCondition(t, 2*time.Second, "node healthy", func() bool {
+		states := mon.GetNodeStates()
+		return len(states) == 1 && states[0].Status == Healthy
+	})
 
 	states := mon.GetNodeStates()
 	if len(states) != 1 {
@@ -69,8 +87,10 @@ func TestMonitorDetectsDeadNode(t *testing.T) {
 	mon.Start()
 	defer mon.Stop()
 
-	// Wait for enough failures
-	time.Sleep(300 * time.Millisecond)
+	waitForCondition(t, 2*time.Second, "node dead", func() bool {
+		states := mon.GetNodeStates()
+		return len(states) == 1 && states[0].Status == Dead
+	})
 
 	states := mon.GetNodeStates()
 	if len(states) != 1 {
@@ -241,7 +261,10 @@ func TestMonitorGPUFieldsPopulated(t *testing.T) {
 	mon.Start()
 	defer mon.Stop()
 
-	time.Sleep(250 * time.Millisecond)
+	waitForCondition(t, 2*time.Second, "GPU fields populated", func() bool {
+		states := mon.GetNodeStates()
+		return len(states) == 1 && states[0].GPUMemoryUsed == 1073741824
+	})
 
 	states := mon.GetNodeStates()
 	if len(states) != 1 {
@@ -295,8 +318,10 @@ func TestMonitorResetsFailuresOnRecovery(t *testing.T) {
 	mon.Start()
 	defer mon.Stop()
 
-	// Wait for failures + recovery
-	time.Sleep(400 * time.Millisecond)
+	waitForCondition(t, 2*time.Second, "recovery to healthy", func() bool {
+		states := mon.GetNodeStates()
+		return len(states) == 1 && states[0].Status == Healthy && states[0].ConsecutiveFailures == 0
+	})
 
 	states := mon.GetNodeStates()
 	if len(states) != 1 {

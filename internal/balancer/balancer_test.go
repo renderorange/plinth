@@ -1,6 +1,7 @@
 package balancer
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 
@@ -113,18 +114,15 @@ func TestSelectRoundRobinWraparound(t *testing.T) {
 		{IP: "10.0.0.3", Name: "node-3", Status: health.Healthy},
 	}
 
-	seen := make(map[string]bool)
-	for i := 0; i < 6; i++ {
+	expected := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.1", "10.0.0.2", "10.0.0.3"}
+	for i, want := range expected {
 		node, err := b.Select("test/model", states)
 		if err != nil {
 			t.Fatalf("iteration %d: unexpected error: %v", i, err)
 		}
-		seen[node.IP] = true
-	}
-
-	// After 6 calls with 3 nodes, each node should be selected at least once
-	if len(seen) != 3 {
-		t.Errorf("expected all 3 nodes seen, got %d: %v", len(seen), seen)
+		if node.IP != want {
+			t.Errorf("iteration %d: got %s, want %s", i, node.IP, want)
+		}
 	}
 }
 
@@ -153,19 +151,26 @@ func TestSelectConcurrentSafety(t *testing.T) {
 		{IP: "10.0.0.2", Name: "node-2", Status: health.Healthy},
 	}
 
+	var mu sync.Mutex
+	var errs []string
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			node, err := b.Select("test/model", states)
+			mu.Lock()
+			defer mu.Unlock()
 			if err != nil {
-				t.Errorf("concurrent select: unexpected error: %v", err)
+				errs = append(errs, fmt.Sprintf("concurrent select: unexpected error: %v", err))
 			}
 			if node == nil {
-				t.Error("concurrent select: got nil node")
+				errs = append(errs, "concurrent select: got nil node")
 			}
 		}()
 	}
 	wg.Wait()
+	if len(errs) > 0 {
+		t.Fatalf("concurrent errors: %v", errs)
+	}
 }

@@ -95,21 +95,21 @@ func TestExporterHealthEndpoint(t *testing.T) {
 		return GPUMetrics{}, nil
 	})
 
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", makeHandler(collector))
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "ok")
-	})
+	exporter := NewExporter(collector)
+	srv := httptest.NewServer(exporter.Handler())
+	defer srv.Close()
 
-	req := httptest.NewRequest("GET", "/health", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
+	resp, err := http.Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatalf("failed to GET /health: %v", err)
 	}
-	if !strings.Contains(w.Body.String(), "ok") {
-		t.Errorf("body = %q, want ok", w.Body.String())
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "ok") {
+		t.Errorf("body = %q, want ok", string(body))
 	}
 }

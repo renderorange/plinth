@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -136,13 +137,39 @@ func TestInfoWithMultipleKeyValues(t *testing.T) {
 }
 
 func TestConcurrentLogging(t *testing.T) {
-	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			Info("concurrent", "goroutine", fmt.Sprintf("%d", n))
-		}(i)
+	out := captureOutput(func() {
+		var wg sync.WaitGroup
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func(n int) {
+				defer wg.Done()
+				Info("concurrent", "goroutine", fmt.Sprintf("%d", n))
+			}(i)
+		}
+		wg.Wait()
+	})
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 50 {
+		t.Fatalf("expected 50 log lines, got %d", len(lines))
 	}
-	wg.Wait()
+
+	goroutines := make(map[string]bool)
+	for i, line := range lines {
+		var m map[string]string
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("line %d: invalid JSON: %v\nline: %s", i, err, line)
+		}
+		if m["level"] != "info" {
+			t.Errorf("line %d: level = %q, want info", i, m["level"])
+		}
+		if m["msg"] != "concurrent" {
+			t.Errorf("line %d: msg = %q, want concurrent", i, m["msg"])
+		}
+		goroutines[m["goroutine"]] = true
+	}
+
+	if len(goroutines) != 50 {
+		t.Errorf("expected 50 unique goroutine values, got %d", len(goroutines))
+	}
 }
