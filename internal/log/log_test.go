@@ -3,7 +3,9 @@ package log
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 )
 
@@ -94,4 +96,53 @@ func TestInfoWithOddKeyValues(t *testing.T) {
 	if _, ok := m["key2"]; ok {
 		t.Error("key2 should not be present (odd arg)")
 	}
+}
+
+func TestErrorWithNoKeyValues(t *testing.T) {
+	out := captureOutput(func() {
+		Error("bare error")
+	})
+
+	var m map[string]string
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("invalid JSON: %v\noutput: %s", err, out)
+	}
+	if m["level"] != "error" {
+		t.Errorf("level = %q, want %q", m["level"], "error")
+	}
+	if m["msg"] != "bare error" {
+		t.Errorf("msg = %q, want %q", m["msg"], "bare error")
+	}
+}
+
+func TestInfoWithMultipleKeyValues(t *testing.T) {
+	out := captureOutput(func() {
+		Info("request", "method", "POST", "path", "/v1/chat", "status", "200")
+	})
+
+	var m map[string]string
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("invalid JSON: %v\noutput: %s", err, out)
+	}
+	if m["method"] != "POST" {
+		t.Errorf("method = %q, want POST", m["method"])
+	}
+	if m["path"] != "/v1/chat" {
+		t.Errorf("path = %q, want /v1/chat", m["path"])
+	}
+	if m["status"] != "200" {
+		t.Errorf("status = %q, want 200", m["status"])
+	}
+}
+
+func TestConcurrentLogging(t *testing.T) {
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			Info("concurrent", "goroutine", fmt.Sprintf("%d", n))
+		}(i)
+	}
+	wg.Wait()
 }
