@@ -112,6 +112,23 @@ func TestCompletionsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsBodyTooLarge(t *testing.T) {
+	h := newTestHandler()
+	old := maxBodyBytes
+	maxBodyBytes = 16
+	defer func() { maxBodyBytes = old }()
+
+	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want %d (body too large)", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
 func TestHealthEndpointJSONStructure(t *testing.T) {
 	h := newTestHandler()
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -122,8 +139,8 @@ func TestHealthEndpointJSONStructure(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if resp["status"] != "ok" {
-		t.Errorf("status = %v, want ok", resp["status"])
+	if resp["status"] != "error" {
+		t.Errorf("status = %v, want error (no nodes)", resp["status"])
 	}
 	if _, ok := resp["nodes"]; !ok {
 		t.Error("response missing nodes field")

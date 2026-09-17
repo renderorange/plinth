@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -21,13 +22,19 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	configPath := flag.String("config", "config/gateway.toml", "path to config file")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("loading config: %w", err)
 	}
 
 	log.Info("starting gateway", "cluster", cfg.Cluster.Name)
@@ -38,6 +45,7 @@ func main() {
 	handler := api.NewHandler(cfg, mon, bal)
 
 	mon.Start()
+	defer mon.Stop()
 
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
@@ -87,27 +95,37 @@ func main() {
 		cancel()
 	}()
 
+	serveErr := make(chan error, 2)
 	go func() {
 		log.Info("api server listening", "addr", cfg.Gateway.Listen)
-		if err := apiServer.ListenAndServe(); err != http.ErrServerClosed {
-			log.Error("api server error", "error", err.Error())
-		}
+		serveErr <- apiServer.ListenAndServe()
 	}()
-
 	go func() {
 		log.Info("metrics server listening", "addr", cfg.Gateway.MetricsListen)
-		if err := metricsServer.ListenAndServe(); err != http.ErrServerClosed {
-			log.Error("metrics server error", "error", err.Error())
-		}
+		serveErr <- metricsServer.ListenAndServe()
 	}()
 
-	<-ctx.Done()
-	mon.Stop()
+	var serveFailed error
+	select {
+	case <-ctx.Done():
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("server error", "error", err.Error())
+			serveFailed = err
+			cancel()
+		}
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	apiServer.Shutdown(shutdownCtx)
-	metricsServer.Shutdown(shutdownCtx)
+	if err := apiServer.Shutdown(shutdownCtx); err != nil {
+		log.Error("api server shutdown error", "error", err.Error())
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		log.Error("metrics server shutdown error", "error", err.Error())
+	}
 	log.Info("gateway stopped")
+
+	return serveFailed
 }

@@ -28,9 +28,10 @@ func TestNodesDeadMetricRegistered(t *testing.T) {
 }
 
 func TestRequestsTotalMetricRegistered(t *testing.T) {
-	m := &dto.Metric{}
 	v := RequestsTotal.WithLabelValues("test", "200")
-	v.(interface{ Write(*dto.Metric) error }).Write(m)
+	if err := v.Write(&dto.Metric{}); err != nil {
+		t.Fatalf("RequestsTotal not registered or not writable: %v", err)
+	}
 }
 
 func TestNodesHealthyCanBeSet(t *testing.T) {
@@ -63,7 +64,9 @@ func TestNodesDeadCanBeSet(t *testing.T) {
 func TestRequestDurationCanBeObserved(t *testing.T) {
 	RequestDuration.Observe(0.5)
 	m := &dto.Metric{}
-	RequestDuration.(interface{ Write(*dto.Metric) error }).Write(m)
+	if err := RequestDuration.Write(m); err != nil {
+		t.Fatalf("RequestDuration not registered or not writable: %v", err)
+	}
 	h := m.GetHistogram()
 	if h.GetSampleCount() < 1 {
 		t.Errorf("RequestDuration sample count = %d, want >= 1", h.GetSampleCount())
@@ -71,9 +74,12 @@ func TestRequestDurationCanBeObserved(t *testing.T) {
 }
 
 func TestRequestsTotalCanBeIncremented(t *testing.T) {
-	RequestsTotal.WithLabelValues("model1", "200").Inc()
+	v := RequestsTotal.WithLabelValues("model1", "200")
+	v.Inc()
 	m := &dto.Metric{}
-	RequestsTotal.WithLabelValues("model1", "200").(interface{ Write(*dto.Metric) error }).Write(m)
+	if err := v.Write(m); err != nil {
+		t.Fatalf("RequestsTotal not registered or not writable: %v", err)
+	}
 	if m.GetCounter().GetValue() < 1 {
 		t.Errorf("RequestsTotal value = %f, want >= 1", m.GetCounter().GetValue())
 	}
