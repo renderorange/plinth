@@ -109,10 +109,15 @@ Config changes require a gateway restart. SIGHUP is not supported.
 
 ## Validation
 
-The gateway validates:
+The gateway validates at startup:
 
-- Config file exists and is parseable
-- `health_interval` is a valid Go duration
+- Config file exists and is parseable TOML
+- `health_interval` is a valid, positive Go duration (defaults to `3s` when omitted)
+- `health_fail_threshold` is greater than zero (defaults to `3` when omitted)
 - At least one node is configured
 
-Model and node configuration are not validated at startup. If a node is unreachable, it will be marked as degraded/dead by the health monitor.
+Unset values fall back to their defaults. Individual nodes and models are not otherwise validated; an unreachable node is marked degraded/dead by the health monitor at runtime.
+
+## Unused Fields
+
+`models.default` and `models.available[].pipeline_stages` are parsed but not yet used by the gateway. Node selection is health-based and model-agnostic.

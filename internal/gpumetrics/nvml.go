@@ -26,6 +26,8 @@ func NewNVMLCollector() (*NVMLCollector, error) {
 		return nil, fmt.Errorf("no GPU devices found")
 	}
 
+	// NOTE: only the first GPU (device index 0) is collected. Multi-GPU nodes
+	// will under-report memory/utilization/temperature for the remaining GPUs.
 	device, ret := nvml.DeviceGetHandleByIndex(0)
 	if ret != nvml.SUCCESS {
 		nvml.Shutdown()

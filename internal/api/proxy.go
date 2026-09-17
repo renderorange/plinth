@@ -14,6 +14,8 @@ func proxyRequest(w http.ResponseWriter, r *http.Request, host string, port int,
 		return
 	}
 	r.URL.Path = path
+	r.URL.RawPath = ""
+	r.URL.RawQuery = ""
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.FlushInterval = -1
 	proxy.ServeHTTP(w, r)

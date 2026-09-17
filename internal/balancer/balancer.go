@@ -7,7 +7,7 @@ import (
 	"distributed-vram/internal/health"
 )
 
-var ErrNoHealthyNode = errors.New("no healthy node available for model")
+var ErrNoHealthyNode = errors.New("no healthy node available")
 
 type Balancer struct {
 	counter atomic.Uint64
@@ -17,7 +17,7 @@ func New() *Balancer {
 	return &Balancer{}
 }
 
-func (b *Balancer) Select(model string, states []health.NodeState) (*health.NodeState, error) {
+func (b *Balancer) Select(states []health.NodeState) (*health.NodeState, error) {
 	var healthy []health.NodeState
 	var degraded []health.NodeState
 

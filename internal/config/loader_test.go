@@ -8,10 +8,10 @@ import (
 
 func TestLoadGatewayConfig(t *testing.T) {
 	tests := []struct {
-		name      string
-		toml      string
-		wantErr   bool
-		validate  func(*testing.T, *Config)
+		name     string
+		toml     string
+		wantErr  bool
+		validate func(*testing.T, *Config)
 	}{
 		{
 			name: "valid full config",
@@ -76,7 +76,7 @@ pipeline_stages = 2
 			},
 		},
 		{
-			name: "missing health_interval",
+			name: "missing health_interval uses default",
 			toml: `
 [cluster]
 name = "test-cluster"
@@ -88,8 +88,95 @@ health_fail_threshold = 2
 
 [models]
 default = "test/model"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "node-1"
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if cfg.Gateway.HealthInterval != 3*time.Second {
+					t.Errorf("health_interval = %v, want default 3s", cfg.Gateway.HealthInterval)
+				}
+			},
+		},
+		{
+			name: "missing fail threshold uses default",
+			toml: `
+[cluster]
+name = "test-cluster"
+
+[gateway]
+listen = ":9000"
+metrics_listen = ":9091"
+health_interval = "5s"
+
+[models]
+default = "test/model"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "node-1"
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if cfg.Gateway.HealthFailThreshold != 3 {
+					t.Errorf("health_fail_threshold = %d, want default 3", cfg.Gateway.HealthFailThreshold)
+				}
+			},
+		},
+		{
+			name: "zero health_interval rejected",
+			toml: `
+[cluster]
+name = "test-cluster"
+
+[gateway]
+listen = ":9000"
+metrics_listen = ":9091"
+health_interval = "0s"
+health_fail_threshold = 2
+
+[models]
+default = "test/model"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "node-1"
 `,
 			wantErr: true,
+		},
+		{
+			name: "node port defaults",
+			toml: `
+[cluster]
+name = "test-cluster"
+
+[gateway]
+listen = ":9000"
+metrics_listen = ":9091"
+health_interval = "5s"
+health_fail_threshold = 2
+
+[models]
+default = "test/model"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "node-1"
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if len(cfg.Nodes) != 1 {
+					t.Fatalf("nodes count = %d, want 1", len(cfg.Nodes))
+				}
+				if cfg.Nodes[0].VLLMPort != 8000 {
+					t.Errorf("vllm_port = %d, want default 8000", cfg.Nodes[0].VLLMPort)
+				}
+				if cfg.Nodes[0].MetricsPort != 9100 {
+					t.Errorf("metrics_port = %d, want default 9100", cfg.Nodes[0].MetricsPort)
+				}
+			},
 		},
 		{
 			name:    "invalid TOML",
@@ -102,7 +189,7 @@ default = "test/model"
 			wantErr: true,
 		},
 		{
-			name: "zero nodes",
+			name: "zero nodes rejected",
 			toml: `
 [cluster]
 name = "test-cluster"
@@ -116,12 +203,7 @@ health_fail_threshold = 2
 [models]
 default = "test/model"
 `,
-			wantErr: false,
-			validate: func(t *testing.T, cfg *Config) {
-				if len(cfg.Nodes) != 0 {
-					t.Errorf("nodes count = %d, want 0", len(cfg.Nodes))
-				}
-			},
+			wantErr: true,
 		},
 		{
 			name: "multiple models",
@@ -137,6 +219,10 @@ health_fail_threshold = 2
 
 [models]
 default = "model-a"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "node-1"
 
 [[models.available]]
 name = "model-a"
@@ -214,12 +300,5 @@ default = "test/model"
 				tt.validate(t, cfg)
 			}
 		})
-	}
-}
-
-func TestWatchNotImplemented(t *testing.T) {
-	err := Watch("/some/path.toml", func(*Config) {})
-	if err == nil {
-		t.Fatal("expected error, got nil")
 	}
 }

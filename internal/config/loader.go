@@ -8,6 +8,15 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
+const (
+	defaultListen         = ":8000"
+	defaultMetricsListen  = ":9090"
+	defaultHealthInterval = 3 * time.Second
+	defaultFailThreshold  = 3
+	defaultVLLMPort       = 8000
+	defaultMetricsPort    = 9100
+)
+
 type rawConfig struct {
 	Cluster struct {
 		Name string
@@ -44,17 +53,11 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
-	interval, err := time.ParseDuration(raw.Gateway.HealthInterval)
-	if err != nil {
-		return nil, fmt.Errorf("parsing health_interval: %w", err)
-	}
-
 	cfg := &Config{
 		Cluster: ClusterConfig{Name: raw.Cluster.Name},
 		Gateway: GatewayConfig{
 			Listen:              raw.Gateway.Listen,
 			MetricsListen:       raw.Gateway.MetricsListen,
-			HealthInterval:      interval,
 			HealthFailThreshold: raw.Gateway.HealthFailThreshold,
 		},
 		Models: ModelsConfig{
@@ -62,12 +65,40 @@ func Load(path string) (*Config, error) {
 		},
 	}
 
+	if cfg.Gateway.Listen == "" {
+		cfg.Gateway.Listen = defaultListen
+	}
+	if cfg.Gateway.MetricsListen == "" {
+		cfg.Gateway.MetricsListen = defaultMetricsListen
+	}
+	if cfg.Gateway.HealthFailThreshold == 0 {
+		cfg.Gateway.HealthFailThreshold = defaultFailThreshold
+	}
+
+	if raw.Gateway.HealthInterval == "" {
+		cfg.Gateway.HealthInterval = defaultHealthInterval
+	} else {
+		interval, err := time.ParseDuration(raw.Gateway.HealthInterval)
+		if err != nil {
+			return nil, fmt.Errorf("parsing health_interval: %w", err)
+		}
+		cfg.Gateway.HealthInterval = interval
+	}
+
 	for _, n := range raw.Nodes {
+		vllmPort := n.VLLMPort
+		if vllmPort == 0 {
+			vllmPort = defaultVLLMPort
+		}
+		metricsPort := n.MetricsPort
+		if metricsPort == 0 {
+			metricsPort = defaultMetricsPort
+		}
 		cfg.Nodes = append(cfg.Nodes, NodeConfig{
 			IP:          n.IP,
 			Name:        n.Name,
-			VLLMPort:    n.VLLMPort,
-			MetricsPort: n.MetricsPort,
+			VLLMPort:    vllmPort,
+			MetricsPort: metricsPort,
 		})
 	}
 
@@ -78,9 +109,9 @@ func Load(path string) (*Config, error) {
 		})
 	}
 
-	return cfg, nil
-}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 
-func Watch(path string, callback func(*Config)) error {
-	return fmt.Errorf("not implemented")
+	return cfg, nil
 }

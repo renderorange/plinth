@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"distributed-vram/internal/metrics"
 )
 
+var maxBodyBytes int64 = 32 << 20
+
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -22,6 +25,12 @@ type statusRecorder struct {
 func (sr *statusRecorder) WriteHeader(code int) {
 	sr.status = code
 	sr.ResponseWriter.WriteHeader(code)
+}
+
+func (sr *statusRecorder) Flush() {
+	if f, ok := sr.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 type Handler struct {
@@ -57,9 +66,15 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 			healthy++
 		}
 	}
+	status := "ok"
+	if healthy == 0 {
+		status = "error"
+	} else if healthy < len(states) {
+		status = "degraded"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "ok",
+		"status":  status,
 		"nodes":   len(states),
 		"healthy": healthy,
 	})
@@ -103,8 +118,14 @@ func (h *Handler) handleCompletions(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path string) {
 	start := time.Now()
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -119,7 +140,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 	}
 
 	states := h.mon.GetNodeStates()
-	node, err := h.bal.Select(body.Model, states)
+	node, err := h.bal.Select(states)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("no healthy node available: %v", err), http.StatusServiceUnavailable)
 		metrics.RequestDuration.Observe(time.Since(start).Seconds())
@@ -128,11 +149,19 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 	}
 
 	var port int
+	found := false
 	for _, nc := range h.cfg.Nodes {
 		if nc.IP == node.IP {
 			port = nc.VLLMPort
+			found = true
 			break
 		}
+	}
+	if !found {
+		http.Error(w, "selected node not found in configuration", http.StatusInternalServerError)
+		metrics.RequestDuration.Observe(time.Since(start).Seconds())
+		metrics.RequestsTotal.WithLabelValues(body.Model, "500").Inc()
+		return
 	}
 
 	r.Body = io.NopCloser(bytes.NewReader(raw))

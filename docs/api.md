@@ -24,7 +24,7 @@ Returns cluster health status.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `status` | string | Always `"ok"` |
+| `status` | string | `"ok"` (all nodes healthy), `"degraded"` (some unhealthy), or `"error"` (no healthy nodes) |
 | `nodes` | int | Total number of configured nodes |
 | `healthy` | int | Number of healthy nodes |
 
@@ -70,7 +70,7 @@ Proxies chat completion requests to a healthy vLLM node.
 }
 ```
 
-The `model` field is required and used for node selection and metrics labeling.
+The `model` field is used for metrics labeling only. Node selection is health-based and model-agnostic.
 
 **Response:** Standard OpenAI chat completion response (proxied from vLLM).
 
@@ -78,7 +78,7 @@ The `model` field is required and used for node selection and metrics labeling.
 
 | Status | Description |
 |--------|-------------|
-| 400 | Invalid request body or missing model |
+| 400 | Invalid request body |
 | 503 | No healthy node available |
 
 ### Text Completions
@@ -98,7 +98,7 @@ Proxies text completion requests to a healthy vLLM node.
 }
 ```
 
-The `model` field is required.
+The `model` field is optional and used only for metrics labeling.
 
 **Response:** Standard OpenAI completion response (proxied from vLLM).
 
@@ -106,7 +106,7 @@ The `model` field is required.
 
 | Status | Description |
 |--------|-------------|
-| 400 | Invalid request body or missing model |
+| 400 | Invalid request body |
 | 503 | No healthy node available |
 
 ## Metrics API (default port 9090)
@@ -176,33 +176,28 @@ Client
 POST /v1/chat/completions
   │
   ▼
-Extract model from body
+Extract model from body (for metrics)
   │
   ▼
-Balancer.Select(model, states)
+Balancer.Select(states)
   │
   ▼
 Proxy to http://<node>:<port>/v1/chat/completions
   │
   ▼
-Response streamed back to client
+Response returned to client (buffered; no streaming)
 ```
 
 ## Error Responses
 
-All errors return JSON:
-
-```json
-{
-  "error": "description of the error"
-}
-```
+Errors are returned as plain text (via `http.Error`) with the appropriate HTTP status code.
 
 Common HTTP status codes:
 
 | Code | Description |
 |------|-------------|
 | 200 | Success |
-| 400 | Bad request (invalid body, missing model) |
+| 400 | Bad request (invalid body) |
+| 413 | Request body too large |
 | 500 | Internal server error |
 | 503 | No healthy node available |

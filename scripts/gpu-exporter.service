@@ -7,6 +7,9 @@ Wants=network-online.target
 Type=simple
 User=vram-exporter
 Group=vram-exporter
+# The exporter needs read access to /dev/nvidia*. The provision script adds the
+# user to the video group; SupplementaryGroups keeps the unit correct regardless.
+SupplementaryGroups=video
 ExecStart=/usr/local/bin/gpu-exporter
 Restart=always
 RestartSec=5
