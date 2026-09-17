@@ -1,6 +1,7 @@
 package gpumetrics
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -118,5 +119,39 @@ gpu_temperature_celsius 0
 				t.Errorf("FormatPrometheus() =\n%s\nwant:\n%s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCollectorCollectDelegates(t *testing.T) {
+	want := GPUMetrics{
+		MemoryUsed:  1024,
+		MemoryTotal: 2048,
+		Utilization: 50,
+		Temperature: 40,
+	}
+	c := NewCollector(func() (GPUMetrics, error) {
+		return want, nil
+	})
+
+	got, err := c.Collect()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Errorf("Collect() = %+v, want %+v", got, want)
+	}
+}
+
+func TestCollectorCollectError(t *testing.T) {
+	c := NewCollector(func() (GPUMetrics, error) {
+		return GPUMetrics{}, fmt.Errorf("nvml error")
+	})
+
+	_, err := c.Collect()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if err.Error() != "nvml error" {
+		t.Errorf("error = %q, want %q", err.Error(), "nvml error")
 	}
 }
