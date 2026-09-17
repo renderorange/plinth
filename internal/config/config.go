@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type Config struct {
 	Cluster ClusterConfig
@@ -35,4 +38,17 @@ type ModelsConfig struct {
 type ModelConfig struct {
 	Name           string
 	PipelineStages int `toml:"pipeline_stages"`
+}
+
+func (c *Config) Validate() error {
+	if c.Gateway.HealthInterval <= 0 {
+		return fmt.Errorf("health_interval must be greater than zero")
+	}
+	if c.Gateway.HealthFailThreshold <= 0 {
+		return fmt.Errorf("health_fail_threshold must be greater than zero")
+	}
+	if len(c.Nodes) == 0 {
+		return fmt.Errorf("at least one node must be configured")
+	}
+	return nil
 }
