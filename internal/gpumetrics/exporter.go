@@ -13,14 +13,18 @@ func NewExporter(provider MetricsProvider) *Exporter {
 	return &Exporter{provider: provider}
 }
 
-func (e *Exporter) ListenAndServe(addr string) error {
+func (e *Exporter) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", makeHandler(e.provider))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
 	})
-	return http.ListenAndServe(addr, mux)
+	return mux
+}
+
+func (e *Exporter) ListenAndServe(addr string) error {
+	return http.ListenAndServe(addr, e.Handler())
 }
 
 func makeHandler(provider MetricsProvider) http.HandlerFunc {

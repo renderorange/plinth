@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -25,7 +26,9 @@ func extractPort(t *testing.T, serverURL string) int {
 }
 
 func TestProxyRequest_ValidTarget(t *testing.T) {
+	var receivedPath atomic.Value
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath.Store(r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	}))
@@ -40,6 +43,9 @@ func TestProxyRequest_ValidTarget(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	if p, ok := receivedPath.Load().(string); !ok || p != "/v1/chat/completions" {
+		t.Errorf("backend received path = %q, want /v1/chat/completions", receivedPath.Load())
 	}
 }
 
@@ -80,6 +86,53 @@ func TestProxyRequest_InvalidHost(t *testing.T) {
 	req := httptest.NewRequest("GET", "/test", nil)
 
 	proxyRequest(rec, req, "256.256.256.256", 80, "/test")
+
+	// The reverse proxy may return 502 or 500 on connection failure
+	// At minimum, verify it doesn't panic and doesn't return 200
+	if rec.Code == http.StatusOK {
+		t.Error("expected non-200 for invalid host, got 200")
+	}
+}
+
+func TestProxyRequest_ForwardsHeaders(t *testing.T) {
+	var receivedContentType atomic.Value
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedContentType.Store(r.Header.Get("Content-Type"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	port := extractPort(t, backend.URL)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	proxyRequest(rec, req, "127.0.0.1", port, "/v1/chat/completions")
+
+	if ct, ok := receivedContentType.Load().(string); !ok || ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", receivedContentType.Load())
+	}
+}
+
+func TestProxyRequest_PathForwarded(t *testing.T) {
+	var receivedPath atomic.Value
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath.Store(r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	port := extractPort(t, backend.URL)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/completions", nil)
+
+	proxyRequest(rec, req, "127.0.0.1", port, "/v1/completions")
+
+	if p, ok := receivedPath.Load().(string); !ok || p != "/v1/completions" {
+		t.Errorf("path = %q, want /v1/completions", receivedPath.Load())
+	}
 }
 
 func TestProxyRequest_BodyPreserved(t *testing.T) {

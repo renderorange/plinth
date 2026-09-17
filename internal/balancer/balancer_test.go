@@ -1,6 +1,8 @@
 package balancer
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"distributed-vram/internal/health"
@@ -93,5 +95,82 @@ func TestSelectDegradedWhenNoHealthy(t *testing.T) {
 	}
 	if node.IP != "10.0.0.1" {
 		t.Errorf("selected %s, want 10.0.0.1 (degraded fallback)", node.IP)
+	}
+}
+
+func TestSelectEmptyStates(t *testing.T) {
+	b := New()
+	_, err := b.Select("test/model", []health.NodeState{})
+	if err != ErrNoHealthyNode {
+		t.Errorf("expected ErrNoHealthyNode, got %v", err)
+	}
+}
+
+func TestSelectRoundRobinWraparound(t *testing.T) {
+	b := New()
+	states := []health.NodeState{
+		{IP: "10.0.0.1", Name: "node-1", Status: health.Healthy},
+		{IP: "10.0.0.2", Name: "node-2", Status: health.Healthy},
+		{IP: "10.0.0.3", Name: "node-3", Status: health.Healthy},
+	}
+
+	expected := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.1", "10.0.0.2", "10.0.0.3"}
+	for i, want := range expected {
+		node, err := b.Select("test/model", states)
+		if err != nil {
+			t.Fatalf("iteration %d: unexpected error: %v", i, err)
+		}
+		if node.IP != want {
+			t.Errorf("iteration %d: got %s, want %s", i, node.IP, want)
+		}
+	}
+}
+
+func TestSelectMixedPoolThreeNodes(t *testing.T) {
+	b := New()
+	states := []health.NodeState{
+		{IP: "10.0.0.1", Name: "node-1", Status: health.Dead},
+		{IP: "10.0.0.2", Name: "node-2", Status: health.Healthy},
+		{IP: "10.0.0.3", Name: "node-3", Status: health.Degraded},
+	}
+
+	// Should pick the healthy node, skipping dead and degraded
+	node, err := b.Select("test/model", states)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if node.IP != "10.0.0.2" {
+		t.Errorf("selected %s, want 10.0.0.2 (only healthy)", node.IP)
+	}
+}
+
+func TestSelectConcurrentSafety(t *testing.T) {
+	b := New()
+	states := []health.NodeState{
+		{IP: "10.0.0.1", Name: "node-1", Status: health.Healthy},
+		{IP: "10.0.0.2", Name: "node-2", Status: health.Healthy},
+	}
+
+	var mu sync.Mutex
+	var errs []string
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			node, err := b.Select("test/model", states)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("concurrent select: unexpected error: %v", err))
+			}
+			if node == nil {
+				errs = append(errs, "concurrent select: got nil node")
+			}
+		}()
+	}
+	wg.Wait()
+	if len(errs) > 0 {
+		t.Fatalf("concurrent errors: %v", errs)
 	}
 }

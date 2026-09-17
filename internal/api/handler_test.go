@@ -75,6 +75,96 @@ func TestChatCompletionsNoNodes(t *testing.T) {
 	}
 }
 
+func TestCompletionsNoNodes(t *testing.T) {
+	h := newTestHandler()
+	body := `{"model":"test/model","prompt":"hello"}`
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 503 {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestChatCompletionsInvalidJSON(t *testing.T) {
+	h := newTestHandler()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("not json"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Errorf("status = %d, want 400 (invalid JSON)", w.Code)
+	}
+}
+
+func TestCompletionsInvalidJSON(t *testing.T) {
+	h := newTestHandler()
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader("{bad"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Errorf("status = %d, want 400 (invalid JSON)", w.Code)
+	}
+}
+
+func TestHealthEndpointJSONStructure(t *testing.T) {
+	h := newTestHandler()
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("status = %v, want ok", resp["status"])
+	}
+	if _, ok := resp["nodes"]; !ok {
+		t.Error("response missing nodes field")
+	}
+	if _, ok := resp["healthy"]; !ok {
+		t.Error("response missing healthy field")
+	}
+}
+
+func TestModelsEndpointStructure(t *testing.T) {
+	h := newTestHandler()
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp["object"] != "list" {
+		t.Errorf("object = %v, want list", resp["object"])
+	}
+	data, ok := resp["data"].([]interface{})
+	if !ok || len(data) == 0 {
+		t.Fatal("missing or empty data array")
+	}
+	entry, ok := data[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("data[0] is not an object")
+	}
+	if entry["id"] != "test/model" {
+		t.Errorf("id = %v, want test/model", entry["id"])
+	}
+	if entry["object"] != "model" {
+		t.Errorf("object = %v, want model", entry["object"])
+	}
+	if entry["owned_by"] != "cluster" {
+		t.Errorf("owned_by = %v, want cluster", entry["owned_by"])
+	}
+}
+
 func TestStatusRecorderCapturesCode(t *testing.T) {
 	tests := []struct {
 		name       string
