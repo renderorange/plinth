@@ -7,8 +7,12 @@ Wants=network-online.target
 Type=simple
 User=vllm
 Group=vllm
+# The vllm user needs access to /dev/nvidia*. The provision script adds it to the
+# video group; SupplementaryGroups keeps the unit correct if provision did too.
+SupplementaryGroups=video
 WorkingDirectory=/opt/vllm
-ExecStart=/opt/vllm/.venv/bin/vllm serve --host 0.0.0.0 --port 8000
+# Replace the model path with the model copied to /opt/models by provision-node.sh.
+ExecStart=/opt/vllm/.venv/bin/vllm serve /opt/models/Qwen2.5-32B-Instruct-Q4 --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 Environment="CUDA_VISIBLE_DEVICES=0"

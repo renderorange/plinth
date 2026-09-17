@@ -87,13 +87,14 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=vllm
+Group=vllm
+SupplementaryGroups=video
 WorkingDirectory=/opt/vllm
-ExecStart=/opt/vllm/.venv/bin/python -m vllm.entrypoints.openai.api_server \
-    --model /opt/models/Qwen2.5-32B-Instruct-Q4 \
-    --host 0.0.0.0 \
-    --port 8000
+# Replace the model path with the model copied to /opt/models by provision-node.sh.
+ExecStart=/opt/vllm/.venv/bin/vllm serve /opt/models/Qwen2.5-32B-Instruct-Q4 --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
+Environment="CUDA_VISIBLE_DEVICES=0"
 
 [Install]
 WantedBy=multi-user.target
@@ -105,17 +106,18 @@ Runs GPU metrics exporter on GPU nodes.
 
 ```ini
 [Unit]
-Description=GPU Metrics Exporter
+Description=Distributed VRAM GPU Metrics Exporter
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=vram-exporter
+Group=vram-exporter
+SupplementaryGroups=video
 ExecStart=/usr/local/bin/gpu-exporter
 Restart=always
 RestartSec=5
-Environment=METRICS_PORT=9100
 
 [Install]
 WantedBy=multi-user.target
@@ -133,6 +135,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=dvram
+Group=dvram
 ExecStart=/usr/local/bin/dvram-gateway --config /etc/dvram/gateway.toml
 Restart=always
 RestartSec=5

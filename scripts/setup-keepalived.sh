@@ -5,6 +5,12 @@ GATEWAY_IP="${1:?Usage: setup-keepalived.sh <gateway-ip> <primary|secondary>}"
 ROLE="${2:?Usage: setup-keepalived.sh <gateway-ip> <primary|secondary>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+if [ "$ROLE" != "primary" ] && [ "$ROLE" != "secondary" ]; then
+    echo "error: ROLE must be 'primary' or 'secondary', got '$ROLE'" >&2
+    echo "Usage: setup-keepalived.sh <gateway-ip> <primary|secondary>" >&2
+    exit 1
+fi
+
 echo "=== Setting up keepalived ($ROLE) on $GATEWAY_IP ==="
 
 # Install keepalived

@@ -90,10 +90,10 @@ Client → Gateway → Balancer.Select() → Health Monitor
 ```
 
 1. Client sends request to gateway
-2. Gateway extracts model from request body
+2. Gateway extracts model from request body (for metrics)
 3. Balancer selects a node based on health state
 4. Gateway reverse-proxies request to selected vLLM instance
-5. Response is streamed back to client
+5. Response is buffered and returned to client (no streaming)
 6. Request duration and status are recorded in metrics
 
 ## Health States

@@ -158,6 +158,8 @@ plinth/
 - **No runtime config reload** — Config changes require a restart. SIGHUP is not supported because the monitor, handler, and servers do not support runtime config propagation.
 - **No model-based routing** — All nodes are assumed to serve all models. The balancer selects based on health, not model availability.
 - **No streaming support** — The proxy buffers full responses; SSE streaming is not yet implemented.
+- **Single-GPU metrics** — The gpu-exporter collects only the first GPU (device index 0); multi-GPU nodes are not fully reported.
+- **No retry on proxy failure** — If a selected node fails mid-request, the request is not retried on another healthy node.
 
 ## License and Copyright
 
