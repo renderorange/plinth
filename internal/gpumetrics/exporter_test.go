@@ -40,8 +40,8 @@ func TestExporterHandler(t *testing.T) {
 			collectFn: func() (GPUMetrics, error) {
 				return GPUMetrics{}, fmt.Errorf("nvml error")
 			},
-			wantCode:   500,
-			wantNotIn:  []string{"gpu_memory_used_bytes"},
+			wantCode:  500,
+			wantNotIn: []string{"gpu_memory_used_bytes"},
 		},
 	}
 

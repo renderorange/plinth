@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +58,9 @@ func (m *Monitor) GetNodeStates() []NodeState {
 	for _, n := range m.nodes {
 		states = append(states, *n)
 	}
+	sort.Slice(states, func(i, j int) bool {
+		return states[i].IP < states[j].IP
+	})
 	return states
 }
 

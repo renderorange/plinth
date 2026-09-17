@@ -75,10 +75,10 @@ func TestFormatPrometheus(t *testing.T) {
 			},
 			want: `# HELP gpu_memory_used_bytes GPU memory used in bytes
 # TYPE gpu_memory_used_bytes gauge
-gpu_memory_used_bytes 5.368709e+08
+gpu_memory_used_bytes 536870912
 # HELP gpu_memory_total_bytes GPU total memory in bytes
 # TYPE gpu_memory_total_bytes gauge
-gpu_memory_total_bytes 1.288490e+10
+gpu_memory_total_bytes 12884901888
 # HELP gpu_utilization_percent GPU utilization percentage
 # TYPE gpu_utilization_percent gauge
 gpu_utilization_percent 45
@@ -97,10 +97,10 @@ gpu_temperature_celsius 62
 			},
 			want: `# HELP gpu_memory_used_bytes GPU memory used in bytes
 # TYPE gpu_memory_used_bytes gauge
-gpu_memory_used_bytes 0.000000e+00
+gpu_memory_used_bytes 0
 # HELP gpu_memory_total_bytes GPU total memory in bytes
 # TYPE gpu_memory_total_bytes gauge
-gpu_memory_total_bytes 0.000000e+00
+gpu_memory_total_bytes 0
 # HELP gpu_utilization_percent GPU utilization percentage
 # TYPE gpu_utilization_percent gauge
 gpu_utilization_percent 0

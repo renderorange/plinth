@@ -15,7 +15,7 @@ func TestSelectHealthyNode(t *testing.T) {
 		{IP: "10.0.0.2", Name: "node-2", Status: health.Healthy},
 	}
 
-	node, err := b.Select("test/model", states)
+	node, err := b.Select(states)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestSelectSkipsDeadNodes(t *testing.T) {
 		{IP: "10.0.0.2", Name: "node-2", Status: health.Healthy},
 	}
 
-	node, err := b.Select("test/model", states)
+	node, err := b.Select(states)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestSelectAllDead(t *testing.T) {
 		{IP: "10.0.0.2", Name: "node-2", Status: health.Dead},
 	}
 
-	_, err := b.Select("test/model", states)
+	_, err := b.Select(states)
 	if err == nil {
 		t.Fatal("expected error when all nodes dead")
 	}
@@ -61,8 +61,8 @@ func TestSelectRoundRobin(t *testing.T) {
 	}
 
 	// First call should select one node, second call the other
-	n1, _ := b.Select("test/model", states)
-	n2, _ := b.Select("test/model", states)
+	n1, _ := b.Select(states)
+	n2, _ := b.Select(states)
 	if n1.IP == n2.IP {
 		t.Errorf("round robin returned same node twice: %s", n1.IP)
 	}
@@ -76,7 +76,7 @@ func TestSelectDeprioritizesDegraded(t *testing.T) {
 	}
 
 	// Should prefer healthy over degraded
-	node, _ := b.Select("test/model", states)
+	node, _ := b.Select(states)
 	if node.IP != "10.0.0.2" {
 		t.Errorf("selected %s, want 10.0.0.2 (healthy preferred over degraded)", node.IP)
 	}
@@ -89,7 +89,7 @@ func TestSelectDegradedWhenNoHealthy(t *testing.T) {
 	}
 
 	// Should use degraded node if no healthy available
-	node, err := b.Select("test/model", states)
+	node, err := b.Select(states)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestSelectDegradedWhenNoHealthy(t *testing.T) {
 
 func TestSelectEmptyStates(t *testing.T) {
 	b := New()
-	_, err := b.Select("test/model", []health.NodeState{})
+	_, err := b.Select([]health.NodeState{})
 	if err != ErrNoHealthyNode {
 		t.Errorf("expected ErrNoHealthyNode, got %v", err)
 	}
@@ -116,7 +116,7 @@ func TestSelectRoundRobinWraparound(t *testing.T) {
 
 	expected := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.1", "10.0.0.2", "10.0.0.3"}
 	for i, want := range expected {
-		node, err := b.Select("test/model", states)
+		node, err := b.Select(states)
 		if err != nil {
 			t.Fatalf("iteration %d: unexpected error: %v", i, err)
 		}
@@ -135,7 +135,7 @@ func TestSelectMixedPoolThreeNodes(t *testing.T) {
 	}
 
 	// Should pick the healthy node, skipping dead and degraded
-	node, err := b.Select("test/model", states)
+	node, err := b.Select(states)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestSelectConcurrentSafety(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			node, err := b.Select("test/model", states)
+			node, err := b.Select(states)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {

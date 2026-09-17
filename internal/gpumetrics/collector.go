@@ -30,10 +30,10 @@ type MetricsProvider interface {
 func FormatPrometheus(m GPUMetrics) string {
 	return fmt.Sprintf(`# HELP gpu_memory_used_bytes GPU memory used in bytes
 # TYPE gpu_memory_used_bytes gauge
-gpu_memory_used_bytes %s
+gpu_memory_used_bytes %d
 # HELP gpu_memory_total_bytes GPU total memory in bytes
 # TYPE gpu_memory_total_bytes gauge
-gpu_memory_total_bytes %s
+gpu_memory_total_bytes %d
 # HELP gpu_utilization_percent GPU utilization percentage
 # TYPE gpu_utilization_percent gauge
 gpu_utilization_percent %d
@@ -41,8 +41,8 @@ gpu_utilization_percent %d
 # TYPE gpu_temperature_celsius gauge
 gpu_temperature_celsius %d
 `,
-		fmt.Sprintf("%e", float64(m.MemoryUsed)),
-		fmt.Sprintf("%e", float64(m.MemoryTotal)),
+		m.MemoryUsed,
+		m.MemoryTotal,
 		m.Utilization,
 		m.Temperature,
 	)

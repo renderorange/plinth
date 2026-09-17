@@ -358,6 +358,30 @@ func TestNewMonitorNodesStartHealthy(t *testing.T) {
 	}
 }
 
+func TestGetNodeStatesSortedByIP(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.3", Name: "node-3", VLLMPort: 8000, MetricsPort: 9100},
+			{IP: "10.0.0.1", Name: "node-1", VLLMPort: 8000, MetricsPort: 9100},
+			{IP: "10.0.0.2", Name: "node-2", VLLMPort: 8000, MetricsPort: 9100},
+		},
+	}
+
+	mon := NewMonitor(cfg)
+	states := mon.GetNodeStates()
+
+	if len(states) != 3 {
+		t.Fatalf("expected 3 nodes, got %d", len(states))
+	}
+	want := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+	for i, s := range states {
+		if s.IP != want[i] {
+			t.Errorf("states[%d].IP = %s, want %s", i, s.IP, want[i])
+		}
+	}
+}
+
 func extractPort(url string) int {
 	// Extract port from httptest.Server URL like "http://127.0.0.1:PORT"
 	for i := len(url) - 1; i >= 0; i-- {
