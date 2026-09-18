@@ -21,7 +21,7 @@ jobs:
       - name: Test
         run: go test ./... -race -count=1
 
-  build:
+  build-matrix:
     runs-on: ubuntu-latest
     needs: test
     strategy:
@@ -53,3 +53,9 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: go build -o gpu-exporter ./cmd/gpu-exporter
+
+  build:
+    runs-on: ubuntu-latest
+    needs: build-matrix
+    steps:
+      - run: echo "All builds passed"
