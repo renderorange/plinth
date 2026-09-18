@@ -171,6 +171,29 @@ func TestExporterHandlerIntegration(t *testing.T) {
 	}
 }
 
+func TestExporterHandlerMultiGPU(t *testing.T) {
+	provider := NewCollector(func() ([]GPUMetrics, error) {
+		return []GPUMetrics{
+			{GPUUUID: "GPU-111", MemoryUsed: 1000, MemoryTotal: 2000, Utilization: 50, Temperature: 60},
+			{GPUUUID: "GPU-222", MemoryUsed: 3000, MemoryTotal: 4000, Utilization: 70, Temperature: 80},
+		}, nil
+	})
+	exporter := NewExporter(provider)
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	exporter.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `gpu_memory_used_bytes{gpu="GPU-111"} 1000`) {
+		t.Error("missing GPU-111 memory_used")
+	}
+	if !strings.Contains(body, `gpu_memory_used_bytes{gpu="GPU-222"} 3000`) {
+		t.Error("missing GPU-222 memory_used")
+	}
+}
+
 func TestExporterHandlerIntegrationError(t *testing.T) {
 	collector := NewCollector(func() ([]GPUMetrics, error) {
 		return nil, fmt.Errorf("nvml init failed")
