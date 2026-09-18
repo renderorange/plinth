@@ -1,14 +1,24 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
 
 	"plinth/internal/gpumetrics"
+	"plinth/internal/version"
 )
 
 func main() {
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version.String())
+		return
+	}
+
 	addr := ":9100"
 	if v := os.Getenv("METRICS_PORT"); v != "" {
 		addr = ":" + v
