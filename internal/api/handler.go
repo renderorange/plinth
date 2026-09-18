@@ -9,10 +9,10 @@ import (
 	"net/http"
 	"time"
 
-	"distributed-vram/internal/balancer"
-	"distributed-vram/internal/config"
-	"distributed-vram/internal/health"
-	"distributed-vram/internal/metrics"
+	"plinth/internal/balancer"
+	"plinth/internal/config"
+	"plinth/internal/health"
+	"plinth/internal/metrics"
 )
 
 var maxBodyBytes int64 = 32 << 20

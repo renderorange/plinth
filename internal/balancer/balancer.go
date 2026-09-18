@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"distributed-vram/internal/health"
+	"plinth/internal/health"
 )
 
 var ErrNoHealthyNode = errors.New("no healthy node available")

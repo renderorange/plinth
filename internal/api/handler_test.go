@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"distributed-vram/internal/balancer"
-	"distributed-vram/internal/config"
-	"distributed-vram/internal/health"
+	"plinth/internal/balancer"
+	"plinth/internal/config"
+	"plinth/internal/health"
 )
 
 func newTestHandler() *Handler {

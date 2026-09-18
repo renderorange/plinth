@@ -12,12 +12,12 @@ import (
 	"syscall"
 	"time"
 
-	"distributed-vram/internal/api"
-	"distributed-vram/internal/balancer"
-	"distributed-vram/internal/config"
-	"distributed-vram/internal/health"
-	"distributed-vram/internal/log"
-	"distributed-vram/internal/metrics"
+	"plinth/internal/api"
+	"plinth/internal/balancer"
+	"plinth/internal/config"
+	"plinth/internal/health"
+	"plinth/internal/log"
+	"plinth/internal/metrics"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )

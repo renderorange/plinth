@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"distributed-vram/internal/gpumetrics"
+	"plinth/internal/gpumetrics"
 )
 
 func main() {
