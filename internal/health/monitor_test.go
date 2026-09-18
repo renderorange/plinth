@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"distributed-vram/internal/config"
+	"plinth/internal/config"
 )
 
 func waitForCondition(t *testing.T, timeout time.Duration, desc string, check func() bool) {

@@ -9,10 +9,10 @@ import (
 	"net/http"
 	"time"
 
-	"distributed-vram/internal/balancer"
-	"distributed-vram/internal/config"
-	"distributed-vram/internal/health"
-	"distributed-vram/internal/metrics"
+	"plinth/internal/balancer"
+	"plinth/internal/config"
+	"plinth/internal/health"
+	"plinth/internal/metrics"
 )
 
 var maxBodyBytes int64 = 32 << 20
@@ -34,18 +34,36 @@ func (sr *statusRecorder) Flush() {
 }
 
 type Handler struct {
-	cfg *config.Config
-	mon *health.Monitor
-	bal *balancer.Balancer
-	mux *http.ServeMux
+	cfg        *config.Config
+	mon        *health.Monitor
+	bal        *balancer.Balancer
+	mux        *http.ServeMux
+	rings      map[string]map[string]bool
+	standalone map[string]bool
 }
 
 func NewHandler(cfg *config.Config, mon *health.Monitor, bal *balancer.Balancer) *Handler {
+	rings := make(map[string]map[string]bool)
+	standalone := make(map[string]bool)
+	for _, n := range cfg.Nodes {
+		if n.Ring != "" {
+			ips := rings[n.Ring]
+			if ips == nil {
+				ips = make(map[string]bool)
+				rings[n.Ring] = ips
+			}
+			ips[n.IP] = true
+		} else {
+			standalone[n.IP] = true
+		}
+	}
 	h := &Handler{
-		cfg: cfg,
-		mon: mon,
-		bal: bal,
-		mux: http.NewServeMux(),
+		cfg:        cfg,
+		mon:        mon,
+		bal:        bal,
+		mux:        http.NewServeMux(),
+		rings:      rings,
+		standalone: standalone,
 	}
 	h.mux.HandleFunc("GET /health", h.handleHealth)
 	h.mux.HandleFunc("GET /v1/models", h.handleModels)
@@ -115,6 +133,20 @@ func (h *Handler) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	h.proxyToVLLM(w, r, "/v1/completions")
 }
 
+func (h *Handler) filterByRing(states []health.NodeState, modelName string) []health.NodeState {
+	pool := h.standalone
+	if ring := h.cfg.ModelRing(modelName); ring != "" {
+		pool = h.rings[ring]
+	}
+	var filtered []health.NodeState
+	for _, s := range states {
+		if pool[s.IP] {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
+}
+
 func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path string) {
 	start := time.Now()
 
@@ -139,12 +171,28 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 		return
 	}
 
+	modelName := body.Model
+	forwardRaw := raw
+	if modelName == "" {
+		if h.cfg.Models.Default == "" {
+			http.Error(w, "model not specified and no default model is configured", http.StatusBadRequest)
+			return
+		}
+		modelName = h.cfg.Models.Default
+		forwardRaw, err = injectModel(raw, modelName)
+		if err != nil {
+			http.Error(w, "failed to apply default model to request body", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	states := h.mon.GetNodeStates()
-	node, err := h.bal.Select(states)
+	filtered := h.filterByRing(states, modelName)
+	node, err := h.bal.Select(filtered)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("no healthy node available: %v", err), http.StatusServiceUnavailable)
 		metrics.RequestDuration.Observe(time.Since(start).Seconds())
-		metrics.RequestsTotal.WithLabelValues(body.Model, "503").Inc()
+		metrics.RequestsTotal.WithLabelValues(modelName, "503").Inc()
 		return
 	}
 
@@ -160,14 +208,30 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 	if !found {
 		http.Error(w, "selected node not found in configuration", http.StatusInternalServerError)
 		metrics.RequestDuration.Observe(time.Since(start).Seconds())
-		metrics.RequestsTotal.WithLabelValues(body.Model, "500").Inc()
+		metrics.RequestsTotal.WithLabelValues(modelName, "500").Inc()
 		return
 	}
 
-	r.Body = io.NopCloser(bytes.NewReader(raw))
+	r.Body = io.NopCloser(bytes.NewReader(forwardRaw))
+	if len(forwardRaw) != len(raw) {
+		r.ContentLength = int64(len(forwardRaw))
+	}
 	sr := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	proxyRequest(sr, r, node.IP, port, path)
 
 	metrics.RequestDuration.Observe(time.Since(start).Seconds())
-	metrics.RequestsTotal.WithLabelValues(body.Model, fmt.Sprintf("%d", sr.status)).Inc()
+	metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", sr.status)).Inc()
+}
+
+// injectModel adds the model to a JSON request body that omitted it, so the
+// backend receives a complete OpenAI-compatible payload.
+func injectModel(raw []byte, modelName string) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var body map[string]any
+	if err := dec.Decode(&body); err != nil {
+		return nil, err
+	}
+	body["model"] = modelName
+	return json.Marshal(body)
 }

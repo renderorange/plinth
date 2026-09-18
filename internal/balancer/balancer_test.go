@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"distributed-vram/internal/health"
+	"plinth/internal/health"
 )
 
 func TestSelectHealthyNode(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"distributed-vram/internal/config"
+	"plinth/internal/config"
 )
 
 type Monitor struct {

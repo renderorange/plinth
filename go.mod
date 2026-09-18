@@ -1,4 +1,4 @@
-module distributed-vram
+module plinth
 
 go 1.22
 

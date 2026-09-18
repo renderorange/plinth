@@ -30,14 +30,16 @@ type rawConfig struct {
 	Nodes []struct {
 		IP          string
 		Name        string
-		VLLMPort    int `toml:"vllm_port"`
-		MetricsPort int `toml:"metrics_port"`
+		VLLMPort    int    `toml:"vllm_port"`
+		MetricsPort int    `toml:"metrics_port"`
+		Ring        string `toml:"ring"`
 	}
 	Models struct {
 		Default   string
 		Available []struct {
 			Name           string
-			PipelineStages int `toml:"pipeline_stages"`
+			PipelineStages int    `toml:"pipeline_stages"`
+			Ring           string `toml:"ring"`
 		}
 	}
 }
@@ -99,6 +101,7 @@ func Load(path string) (*Config, error) {
 			Name:        n.Name,
 			VLLMPort:    vllmPort,
 			MetricsPort: metricsPort,
+			Ring:        n.Ring,
 		})
 	}
 
@@ -106,6 +109,7 @@ func Load(path string) (*Config, error) {
 		cfg.Models.Available = append(cfg.Models.Available, ModelConfig{
 			Name:           m.Name,
 			PipelineStages: m.PipelineStages,
+			Ring:           m.Ring,
 		})
 	}
 

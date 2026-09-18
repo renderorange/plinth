@@ -87,9 +87,11 @@ See [config/gateway.toml.example](config/gateway.toml.example) for a complete ex
 | `[[nodes]]` | `name` | Node display name | — |
 | `[[nodes]]` | `vllm_port` | vLLM API port | `8000` |
 | `[[nodes]]` | `metrics_port` | gpu-exporter port | `9100` |
+| `[[nodes]]` | `ring` | Ring this node belongs to (empty for standalone) | — |
 | `[models]` | `default` | Default model name | — |
 | `[[models.available]]` | `name` | Model identifier | — |
-| `[[models.available]]` | `pipeline_stages` | Pipeline parallelism stages | `1` |
+| `[[models.available]]` | `pipeline_stages` | Informational metadata only | `1` |
+| `[[models.available]]` | `ring` | Ring whose nodes serve this model (empty for standalone) | — |
 
 ## API Endpoints
 
@@ -156,7 +158,7 @@ plinth/
 ## Limitations
 
 - **No runtime config reload** — Config changes require a restart. SIGHUP is not supported because the monitor, handler, and servers do not support runtime config propagation.
-- **No model-based routing** — All nodes are assumed to serve all models. The balancer selects based on health, not model availability.
+- **No per-node model awareness** — Routing uses ring membership from config: ring models round-robin among that ring's nodes, all other models round-robin among ring-less nodes. The gateway does not verify which models each node actually serves.
 - **No streaming support** — The proxy buffers full responses; SSE streaming is not yet implemented.
 - **Multi-GPU support** — The gpu-exporter now collects metrics from all NVIDIA GPUs on a node, exposing them with UUID-based labels in Prometheus format.
 - **No retry on proxy failure** — If a selected node fails mid-request, the request is not retried on another healthy node.
