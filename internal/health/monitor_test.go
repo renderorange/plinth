@@ -1,8 +1,10 @@
 package health
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
@@ -35,7 +37,7 @@ func TestMonitorChecksNodes(t *testing.T) {
 	// Fake metrics endpoint
 	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("gpu_memory_used_bytes 100\ngpu_memory_total_bytes 200\ngpu_utilization_percent 50\ngpu_temperature_celsius 40\n"))
+		w.Write([]byte("gpu_memory_used_bytes{gpu=\"GPU-abc\"} 100\ngpu_memory_total_bytes{gpu=\"GPU-abc\"} 200\ngpu_utilization_percent{gpu=\"GPU-abc\"} 50\ngpu_temperature_celsius{gpu=\"GPU-abc\"} 40\n"))
 	}))
 	defer metrics.Close()
 
@@ -104,7 +106,7 @@ func TestMonitorDetectsDeadNode(t *testing.T) {
 func TestScrapeMetricsAllFields(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("gpu_memory_used_bytes 8589934592\ngpu_memory_total_bytes 25769803776\ngpu_utilization_percent 87\ngpu_temperature_celsius 72\n"))
+		w.Write([]byte("gpu_memory_used_bytes{gpu=\"GPU-test\"} 8589934592\ngpu_memory_total_bytes{gpu=\"GPU-test\"} 25769803776\ngpu_utilization_percent{gpu=\"GPU-test\"} 87\ngpu_temperature_celsius{gpu=\"GPU-test\"} 72\n"))
 	}))
 	defer srv.Close()
 
@@ -114,10 +116,14 @@ func TestScrapeMetricsAllFields(t *testing.T) {
 	}
 	mon := NewMonitor(cfg)
 
-	m := mon.scrapeMetrics(srv.URL)
-	if m == nil {
+	metrics := mon.scrapeMetrics(srv.URL)
+	if metrics == nil {
 		t.Fatal("expected metrics, got nil")
 	}
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 GPU, got %d", len(metrics))
+	}
+	m := metrics[0]
 	if m.MemoryUsed != 8589934592 {
 		t.Errorf("MemoryUsed = %d, want 8589934592", m.MemoryUsed)
 	}
@@ -154,7 +160,7 @@ func TestScrapeMetricsEmptyBody(t *testing.T) {
 func TestScrapeMetricsMalformedLines(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("# comment line\ngpu_memory_used_bytes not_a_number\nonly_one_field\ngpu_memory_used_bytes 100\n"))
+		w.Write([]byte("# comment line\ngpu_memory_used_bytes not_a_number\nonly_one_field\ngpu_memory_used_bytes{gpu=\"GPU-mal\"} 100\n"))
 	}))
 	defer srv.Close()
 
@@ -164,12 +170,15 @@ func TestScrapeMetricsMalformedLines(t *testing.T) {
 	}
 	mon := NewMonitor(cfg)
 
-	m := mon.scrapeMetrics(srv.URL)
-	if m == nil {
+	metrics := mon.scrapeMetrics(srv.URL)
+	if metrics == nil {
 		t.Fatal("expected metrics from valid line, got nil")
 	}
-	if m.MemoryUsed != 100 {
-		t.Errorf("MemoryUsed = %d, want 100 (should skip malformed lines)", m.MemoryUsed)
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 GPU, got %d", len(metrics))
+	}
+	if metrics[0].MemoryUsed != 100 {
+		t.Errorf("MemoryUsed = %d, want 100 (should skip malformed lines)", metrics[0].MemoryUsed)
 	}
 }
 
@@ -213,7 +222,7 @@ func TestScrapeMetricsNon200(t *testing.T) {
 func TestScrapeMetricsPartialFields(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("gpu_memory_used_bytes 500\n"))
+		w.Write([]byte("gpu_memory_used_bytes{gpu=\"GPU-part\"} 500\n"))
 	}))
 	defer srv.Close()
 
@@ -223,15 +232,18 @@ func TestScrapeMetricsPartialFields(t *testing.T) {
 	}
 	mon := NewMonitor(cfg)
 
-	m := mon.scrapeMetrics(srv.URL)
-	if m == nil {
+	metrics := mon.scrapeMetrics(srv.URL)
+	if metrics == nil {
 		t.Fatal("expected metrics with partial fields, got nil")
 	}
-	if m.MemoryUsed != 500 {
-		t.Errorf("MemoryUsed = %d, want 500", m.MemoryUsed)
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 GPU, got %d", len(metrics))
 	}
-	if m.MemoryTotal != 0 {
-		t.Errorf("MemoryTotal = %d, want 0 (not provided)", m.MemoryTotal)
+	if metrics[0].MemoryUsed != 500 {
+		t.Errorf("MemoryUsed = %d, want 500", metrics[0].MemoryUsed)
+	}
+	if metrics[0].MemoryTotal != 0 {
+		t.Errorf("MemoryTotal = %d, want 0 (not provided)", metrics[0].MemoryTotal)
 	}
 }
 
@@ -243,7 +255,7 @@ func TestMonitorGPUFieldsPopulated(t *testing.T) {
 
 	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("gpu_memory_used_bytes 1073741824\ngpu_memory_total_bytes 8589934592\ngpu_utilization_percent 65\ngpu_temperature_celsius 58\n"))
+		w.Write([]byte("gpu_memory_used_bytes{gpu=\"GPU-gpu\"} 1073741824\ngpu_memory_total_bytes{gpu=\"GPU-gpu\"} 8589934592\ngpu_utilization_percent{gpu=\"GPU-gpu\"} 65\ngpu_temperature_celsius{gpu=\"GPU-gpu\"} 58\n"))
 	}))
 	defer metrics.Close()
 
@@ -304,7 +316,7 @@ func TestMonitorResetsFailuresOnRecovery(t *testing.T) {
 
 	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("gpu_memory_used_bytes 100\n"))
+		w.Write([]byte("gpu_memory_used_bytes{gpu=\"GPU-rec\"} 100\n"))
 	}))
 	defer metrics.Close()
 
@@ -382,6 +394,117 @@ func TestGetNodeStatesSortedByIP(t *testing.T) {
 	for i, s := range states {
 		if s.IP != want[i] {
 			t.Errorf("states[%d].IP = %s, want %s", i, s.IP, want[i])
+		}
+	}
+}
+
+func TestScrapeMetricsMultiGPU(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `# HELP gpu_memory_used_bytes GPU memory used in bytes
+# TYPE gpu_memory_used_bytes gauge
+gpu_memory_used_bytes{gpu="GPU-aaa"} 1000
+gpu_memory_used_bytes{gpu="GPU-bbb"} 2000
+# HELP gpu_memory_total_bytes GPU total memory in bytes
+# TYPE gpu_memory_total_bytes gauge
+gpu_memory_total_bytes{gpu="GPU-aaa"} 4000
+gpu_memory_total_bytes{gpu="GPU-bbb"} 8000
+# HELP gpu_utilization_percent GPU utilization percentage
+# TYPE gpu_utilization_percent gauge
+gpu_utilization_percent{gpu="GPU-aaa"} 50
+gpu_utilization_percent{gpu="GPU-bbb"} 75
+# HELP gpu_temperature_celsius GPU temperature in celsius
+# TYPE gpu_temperature_celsius gauge
+gpu_temperature_celsius{gpu="GPU-aaa"} 60
+gpu_temperature_celsius{gpu="GPU-bbb"} 70
+`)
+	}))
+	defer ts.Close()
+
+	m := &Monitor{client: ts.Client()}
+	metrics := m.scrapeMetrics(ts.URL)
+	if metrics == nil {
+		t.Fatal("expected metrics, got nil")
+	}
+	if len(metrics) != 2 {
+		t.Fatalf("expected 2 GPUs, got %d", len(metrics))
+	}
+	sort.Slice(metrics, func(i, j int) bool {
+		return metrics[i].GPUUUID < metrics[j].GPUUUID
+	})
+	if metrics[0].GPUUUID != "GPU-aaa" {
+		t.Errorf("expected GPU-aaa, got %s", metrics[0].GPUUUID)
+	}
+	if metrics[0].MemoryUsed != 1000 {
+		t.Errorf("expected 1000, got %d", metrics[0].MemoryUsed)
+	}
+	if metrics[1].GPUUUID != "GPU-bbb" {
+		t.Errorf("expected GPU-bbb, got %s", metrics[1].GPUUUID)
+	}
+	if metrics[1].MemoryUsed != 2000 {
+		t.Errorf("expected 2000, got %d", metrics[1].MemoryUsed)
+	}
+}
+
+func TestScrapeMetricsSingleGPU(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `# HELP gpu_memory_used_bytes GPU memory used in bytes
+# TYPE gpu_memory_used_bytes gauge
+gpu_memory_used_bytes{gpu="GPU-ccc"} 500
+# HELP gpu_memory_total_bytes GPU total memory in bytes
+# TYPE gpu_memory_total_bytes gauge
+gpu_memory_total_bytes{gpu="GPU-ccc"} 1000
+# HELP gpu_utilization_percent GPU utilization percentage
+# TYPE gpu_utilization_percent gauge
+gpu_utilization_percent{gpu="GPU-ccc"} 25
+# HELP gpu_temperature_celsius GPU temperature in celsius
+# TYPE gpu_temperature_celsius gauge
+gpu_temperature_celsius{gpu="GPU-ccc"} 45
+`)
+	}))
+	defer ts.Close()
+
+	m := &Monitor{client: ts.Client()}
+	metrics := m.scrapeMetrics(ts.URL)
+	if metrics == nil {
+		t.Fatal("expected metrics, got nil")
+	}
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 GPU, got %d", len(metrics))
+	}
+	if metrics[0].GPUUUID != "GPU-ccc" {
+		t.Errorf("expected GPU-ccc, got %s", metrics[0].GPUUUID)
+	}
+}
+
+func TestScrapeMetricsNoGPU(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `# HELP gpu_memory_used_bytes GPU memory used in bytes
+# TYPE gpu_memory_used_bytes gauge
+`)
+	}))
+	defer ts.Close()
+
+	m := &Monitor{client: ts.Client()}
+	metrics := m.scrapeMetrics(ts.URL)
+	if metrics != nil {
+		t.Errorf("expected nil, got %v", metrics)
+	}
+}
+
+func TestExtractGPUUUID(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{`gpu_memory_used_bytes{gpu="GPU-aaa"} 1000`, "GPU-aaa"},
+		{`gpu_memory_total_bytes{gpu="GPU-bbb"} 2000`, "GPU-bbb"},
+		{`gpu_memory_used_bytes 1000`, ""},
+		{`gpu_memory_used_bytes{gpu=""} 1000`, ""},
+	}
+	for _, tt := range tests {
+		got := extractGPUUUID(tt.name)
+		if got != tt.want {
+			t.Errorf("extractGPUUUID(%q) = %q, want %q", tt.name, got, tt.want)
 		}
 	}
 }
