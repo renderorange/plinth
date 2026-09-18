@@ -79,6 +79,14 @@ Prometheus metrics for the gateway:
 - `gateway_request_duration_seconds` — Histogram for request latency
 - `gateway_requests_total` — Counter for requests by model and status
 
+### `internal/version/`
+
+Build version information:
+
+- Stores version, commit hash, and build time
+- Injected via `-ldflags` at build time
+- Exposed via `--version` flag on both binaries
+
 ## Request Flow
 
 ```
