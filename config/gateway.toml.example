@@ -7,25 +7,37 @@ metrics_listen = ":9090"
 health_interval = "3s"
 health_fail_threshold = 3
 
+# Standalone nodes — each independently serves non-ring models (round-robin)
 [[nodes]]
 ip = "192.168.1.100"
 name = "gpu-node-1"
-vllm_port = 8000
-metrics_port = 9100
 
 [[nodes]]
 ip = "192.168.1.101"
 name = "gpu-node-2"
-vllm_port = 8000
-metrics_port = 9100
+
+# Ring nodes — each independently serves the ring model; requests
+# round-robin within the ring
+[[nodes]]
+ip = "192.168.1.102"
+name = "gpu-node-3"
+ring = "ring-a"
+
+[[nodes]]
+ip = "192.168.1.103"
+name = "gpu-node-4"
+ring = "ring-a"
 
 [models]
-default = "Qwen/Qwen2.5-32B-Instruct-Q4"
+default = "Qwen/Qwen2.5-7B-Instruct"
 
+# Ring model — routed round-robin among the nodes in ring-a
 [[models.available]]
 name = "Qwen/Qwen2.5-32B-Instruct-Q4"
-pipeline_stages = 2
+pipeline_stages = 2 # informational metadata; not enforced by the gateway
+ring = "ring-a"
 
+# Standalone model — routed round-robin among nodes without a ring
 [[models.available]]
 name = "Qwen/Qwen2.5-7B-Instruct"
 pipeline_stages = 1

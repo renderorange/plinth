@@ -31,7 +31,7 @@ A standalone process that runs on each GPU node and:
 
 HTTP handlers and reverse proxy:
 
-- `handler.go` — Routes requests to `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`
+- `handler.go` — Routes requests to `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`; filters candidate nodes by ring membership before balancing
 - `proxy.go` — Reverse proxies requests to selected vLLM instances
 
 ### `internal/balancer/`
@@ -90,8 +90,8 @@ Client → Gateway → Balancer.Select() → Health Monitor
 ```
 
 1. Client sends request to gateway
-2. Gateway extracts model from request body (for metrics)
-3. Balancer selects a node based on health state
+2. Gateway extracts the model from the request body (applying the configured default when omitted) and picks the routing pool: the model's ring nodes, or the ring-less nodes for non-ring models
+3. Balancer selects a node within that pool based on health state
 4. Gateway reverse-proxies request to selected vLLM instance
 5. Response is buffered and returned to client (no streaming)
 6. Request duration and status are recorded in metrics

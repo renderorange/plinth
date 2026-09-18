@@ -445,3 +445,225 @@ func TestModelsEndpointDataValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestFilterByRingRoutesToRing(t *testing.T) {
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+			{IP: "10.0.0.2", Name: "node-2", Ring: "ring-a"},
+			{IP: "10.0.0.3", Name: "node-3", Ring: "ring-a"},
+		},
+		Models: config.ModelsConfig{
+			Default: "small/model",
+			Available: []config.ModelConfig{
+				{Name: "big/model", PipelineStages: 2, Ring: "ring-a"},
+				{Name: "small/model", PipelineStages: 1},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	bal := balancer.New()
+	h := NewHandler(cfg, mon, bal)
+
+	states := []health.NodeState{
+		{IP: "10.0.0.1", Name: "node-1", Status: health.Healthy},
+		{IP: "10.0.0.2", Name: "node-2", Status: health.Healthy},
+		{IP: "10.0.0.3", Name: "node-3", Status: health.Healthy},
+	}
+
+	filtered := h.filterByRing(states, "big/model")
+	if len(filtered) != 2 {
+		t.Fatalf("filterByRing(big/model) = %d nodes, want 2", len(filtered))
+	}
+	for _, s := range filtered {
+		if s.IP == "10.0.0.1" {
+			t.Error("filterByRing(big/model) should not include ungrouped node")
+		}
+	}
+}
+
+func TestFilterByRingExcludesRingNodes(t *testing.T) {
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+			{IP: "10.0.0.2", Name: "node-2", Ring: "ring-a"},
+		},
+		Models: config.ModelsConfig{
+			Default: "small/model",
+			Available: []config.ModelConfig{
+				{Name: "big/model", PipelineStages: 2, Ring: "ring-a"},
+				{Name: "small/model", PipelineStages: 1},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	bal := balancer.New()
+	h := NewHandler(cfg, mon, bal)
+
+	states := []health.NodeState{
+		{IP: "10.0.0.1", Name: "node-1", Status: health.Healthy},
+		{IP: "10.0.0.2", Name: "node-2", Status: health.Healthy},
+	}
+
+	filtered := h.filterByRing(states, "small/model")
+	if len(filtered) != 1 {
+		t.Fatalf("filterByRing(small/model) = %d nodes, want 1", len(filtered))
+	}
+	if filtered[0].IP != "10.0.0.1" {
+		t.Errorf("filterByRing(small/model) selected %s, want 10.0.0.1", filtered[0].IP)
+	}
+}
+
+func TestFilterByRingNoRingModelNoGroups(t *testing.T) {
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+			{IP: "10.0.0.2", Name: "node-2"},
+		},
+		Models: config.ModelsConfig{
+			Default: "test/model",
+			Available: []config.ModelConfig{
+				{Name: "test/model", PipelineStages: 1},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	bal := balancer.New()
+	h := NewHandler(cfg, mon, bal)
+
+	states := []health.NodeState{
+		{IP: "10.0.0.1", Name: "node-1", Status: health.Healthy},
+		{IP: "10.0.0.2", Name: "node-2", Status: health.Healthy},
+	}
+
+	filtered := h.filterByRing(states, "test/model")
+	if len(filtered) != 2 {
+		t.Fatalf("filterByRing(test/model) = %d nodes, want 2", len(filtered))
+	}
+}
+
+func TestFilterByRingUnknownModelWithRings(t *testing.T) {
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+			{IP: "10.0.0.2", Name: "node-2", Ring: "ring-a"},
+		},
+		Models: config.ModelsConfig{
+			Default: "small/model",
+			Available: []config.ModelConfig{
+				{Name: "small/model", PipelineStages: 1},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	bal := balancer.New()
+	h := NewHandler(cfg, mon, bal)
+
+	states := []health.NodeState{
+		{IP: "10.0.0.1", Name: "node-1", Status: health.Healthy},
+		{IP: "10.0.0.2", Name: "node-2", Status: health.Healthy},
+	}
+
+	filtered := h.filterByRing(states, "unknown/model")
+	if len(filtered) != 1 {
+		t.Fatalf("filterByRing(unknown/model) = %d nodes, want 1", len(filtered))
+	}
+	if filtered[0].IP != "10.0.0.1" {
+		t.Errorf("filterByRing(unknown/model) selected %s, want 10.0.0.1", filtered[0].IP)
+	}
+}
+
+func TestProxyToVLLMDefaultModelRoutesToRing(t *testing.T) {
+	var receivedBody atomic.Value
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		receivedBody.Store(string(body))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"choices":[{"text":"hello"}]}`)
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	port, _ := strconv.Atoi(u.Port())
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Gateway: config.GatewayConfig{
+			HealthInterval:      100 * time.Millisecond,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "ring-node", VLLMPort: port, MetricsPort: port, Ring: "ring-a"},
+		},
+		Models: config.ModelsConfig{
+			Default: "big/model",
+			Available: []config.ModelConfig{
+				{Name: "big/model", Ring: "ring-a"},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	h := NewHandler(cfg, mon, balancer.New())
+	mon.Start()
+	defer mon.Stop()
+
+	waitForHealthy(t, mon)
+
+	payload := `{"prompt":"hello"}`
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (default ring model must route to ring node)", w.Code)
+	}
+	body, ok := receivedBody.Load().(string)
+	if !ok {
+		t.Fatal("backend did not receive a body")
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("backend received invalid JSON: %v (body %q)", err, body)
+	}
+	if got["model"] != "big/model" {
+		t.Errorf("backend body model = %v, want big/model", got["model"])
+	}
+}
+
+func TestProxyToVLLMMissingModelNoDefaultReturns400(t *testing.T) {
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Gateway: config.GatewayConfig{
+			HealthInterval:      3 * time.Second,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+		},
+		Models: config.ModelsConfig{
+			Available: []config.ModelConfig{
+				{Name: "test/model", PipelineStages: 1},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	h := NewHandler(cfg, mon, balancer.New())
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"prompt":"hi"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}

@@ -70,7 +70,7 @@ Proxies chat completion requests to a healthy vLLM node.
 }
 ```
 
-The `model` field is used for metrics labeling only. Node selection is health-based and model-agnostic.
+The `model` field picks the routing pool: ring models round-robin among their ring's nodes; anything else round-robins among ring-less nodes. If omitted, the configured default model is used for routing and injected into the forwarded request.
 
 **Response:** Standard OpenAI chat completion response (proxied from vLLM).
 
@@ -78,7 +78,7 @@ The `model` field is used for metrics labeling only. Node selection is health-ba
 
 | Status | Description |
 |--------|-------------|
-| 400 | Invalid request body |
+| 400 | Invalid request body, or `model` omitted with no default configured |
 | 503 | No healthy node available |
 
 ### Text Completions
@@ -98,7 +98,7 @@ Proxies text completion requests to a healthy vLLM node.
 }
 ```
 
-The `model` field is optional and used only for metrics labeling.
+The `model` field is optional. If omitted, the configured default model is used for routing and injected into the forwarded request.
 
 **Response:** Standard OpenAI completion response (proxied from vLLM).
 
@@ -106,7 +106,7 @@ The `model` field is optional and used only for metrics labeling.
 
 | Status | Description |
 |--------|-------------|
-| 400 | Invalid request body |
+| 400 | Invalid request body, or `model` omitted with no default configured |
 | 503 | No healthy node available |
 
 ## Metrics API (default port 9090)

@@ -265,6 +265,69 @@ default = "test/model"
 `,
 			wantErr: true,
 		},
+		{
+			name: "ring fields",
+			toml: `
+[cluster]
+name = "test-cluster"
+
+[gateway]
+listen = ":9000"
+metrics_listen = ":9091"
+health_interval = "5s"
+health_fail_threshold = 2
+
+[models]
+default = "small/model"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "node-1"
+
+[[nodes]]
+ip = "10.0.0.2"
+name = "node-2"
+ring = "ring-a"
+
+[[nodes]]
+ip = "10.0.0.3"
+name = "node-3"
+ring = "ring-a"
+
+[[models.available]]
+name = "big/model"
+pipeline_stages = 2
+ring = "ring-a"
+
+[[models.available]]
+name = "small/model"
+pipeline_stages = 1
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if len(cfg.Nodes) != 3 {
+					t.Fatalf("nodes count = %d, want 3", len(cfg.Nodes))
+				}
+				if cfg.Nodes[0].Ring != "" {
+					t.Errorf("node[0].ring = %q, want empty", cfg.Nodes[0].Ring)
+				}
+				if cfg.Nodes[1].Ring != "ring-a" {
+					t.Errorf("node[1].ring = %q, want ring-a", cfg.Nodes[1].Ring)
+				}
+				if cfg.Nodes[2].Ring != "ring-a" {
+					t.Errorf("node[2].ring = %q, want ring-a", cfg.Nodes[2].Ring)
+				}
+				if len(cfg.Models.Available) != 2 {
+					t.Fatalf("models count = %d, want 2", len(cfg.Models.Available))
+				}
+				if cfg.Models.Available[0].Ring != "ring-a" {
+					t.Errorf("model[0].ring = %q, want ring-a", cfg.Models.Available[0].Ring)
+				}
+				if cfg.Models.Available[1].Ring != "" {
+					t.Errorf("model[1].ring = %q, want empty", cfg.Models.Available[1].Ring)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

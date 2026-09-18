@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,6 +40,27 @@ func run() error {
 
 	log.Info("starting gateway", "cluster", cfg.Cluster.Name)
 	log.Info("config loaded", "nodes", fmt.Sprintf("%d", len(cfg.Nodes)), "models", fmt.Sprintf("%d", len(cfg.Models.Available)))
+
+	var standalone []string
+	ringMembers := make(map[string][]string)
+	for _, n := range cfg.Nodes {
+		if n.Ring == "" {
+			standalone = append(standalone, n.Name)
+		} else {
+			ringMembers[n.Ring] = append(ringMembers[n.Ring], n.Name)
+		}
+	}
+	if len(standalone) > 0 {
+		log.Info("standalone nodes serving non-ring models", "nodes", strings.Join(standalone, ","))
+	}
+	for ring, members := range ringMembers {
+		log.Info("ring nodes", "ring", ring, "nodes", strings.Join(members, ","))
+	}
+	for _, m := range cfg.Models.Available {
+		if m.Ring != "" {
+			log.Info("model routed to ring", "model", m.Name, "ring", m.Ring)
+		}
+	}
 
 	mon := health.NewMonitor(cfg)
 	bal := balancer.New()
