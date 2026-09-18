@@ -48,12 +48,19 @@ Each GPU node runs:
 ### Build
 
 ```bash
-# Build gateway
-go build -o gateway ./cmd/gateway
+# Build both binaries
+make all
 
-# Build gpu-exporter
+# Or build individually
+make build-gateway
+make build-gpu-exporter
+
+# Or use go directly
+go build -o gateway ./cmd/gateway
 go build -o gpu-exporter ./cmd/gpu-exporter
 ```
+
+The Makefile also provides: `test`, `vet`, `fmt`, `cover`, `clean`, and versioned build targets (`build-gateway-versioned`, `build-gpu-exporter-versioned`) that inject git commit hash and build time.
 
 ### Configure
 
@@ -137,6 +144,13 @@ Deployment scripts are provided in `scripts/`:
 - `gpu-exporter.service` — systemd unit for gpu-exporter
 - `keepalived-primary.conf` / `keepalived-secondary.conf` — keepalived configs
 
+## CI/CD
+
+GitHub Actions workflows in `.github/workflows/`:
+
+- **PR checks** (`pr.yml`) — Runs `go vet`, tests with race detector, and builds gateway + gpu-exporter on linux/amd64 and linux/arm64
+- **Release** (`release.yml`) — On merge to main: runs tests, builds versioned binaries, creates a GitHub release with commit hash version, and attaches all binaries
+
 ## Project Structure
 
 ```
@@ -145,13 +159,18 @@ plinth/
 │   ├── gateway/         # Gateway binary
 │   └── gpu-exporter/    # GPU metrics exporter
 ├── config/              # Configuration files
+├── docs/                # Detailed documentation
+├── .github/workflows/   # CI/CD (PR checks + release)
 ├── internal/
 │   ├── api/             # HTTP handlers + reverse proxy
 │   ├── balancer/        # Round-robin load balancer
 │   ├── config/          # TOML config loader
 │   ├── gpumetrics/      # NVML collector + Prometheus exporter
 │   ├── health/          # Node health monitoring
-│   └── log/             # Structured logging
+│   ├── log/             # Structured logging
+│   ├── metrics/         # Prometheus gateway metrics
+│   └── version/         # Build version info
+├── Makefile             # Build, test, and utility targets
 └── scripts/             # Deployment scripts
 ```
 
