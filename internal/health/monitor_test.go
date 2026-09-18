@@ -263,7 +263,7 @@ func TestMonitorGPUFieldsPopulated(t *testing.T) {
 
 	waitForCondition(t, 2*time.Second, "GPU fields populated", func() bool {
 		states := mon.GetNodeStates()
-		return len(states) == 1 && states[0].GPUMemoryUsed == 1073741824
+		return len(states) == 1 && len(states[0].GPUs) == 1 && states[0].GPUs[0].MemoryUsed == 1073741824
 	})
 
 	states := mon.GetNodeStates()
@@ -272,17 +272,21 @@ func TestMonitorGPUFieldsPopulated(t *testing.T) {
 	}
 
 	s := states[0]
-	if s.GPUMemoryUsed != 1073741824 {
-		t.Errorf("GPUMemoryUsed = %d, want 1073741824", s.GPUMemoryUsed)
+	if len(s.GPUs) != 1 {
+		t.Fatalf("expected 1 GPU, got %d", len(s.GPUs))
 	}
-	if s.GPUMemoryTotal != 8589934592 {
-		t.Errorf("GPUMemoryTotal = %d, want 8589934592", s.GPUMemoryTotal)
+	gpu := s.GPUs[0]
+	if gpu.MemoryUsed != 1073741824 {
+		t.Errorf("MemoryUsed = %d, want 1073741824", gpu.MemoryUsed)
 	}
-	if s.GPUUtilization != 65 {
-		t.Errorf("GPUUtilization = %d, want 65", s.GPUUtilization)
+	if gpu.MemoryTotal != 8589934592 {
+		t.Errorf("MemoryTotal = %d, want 8589934592", gpu.MemoryTotal)
 	}
-	if s.GPUTemperature != 58 {
-		t.Errorf("GPUTemperature = %d, want 58", s.GPUTemperature)
+	if gpu.Utilization != 65 {
+		t.Errorf("Utilization = %d, want 65", gpu.Utilization)
+	}
+	if gpu.Temperature != 58 {
+		t.Errorf("Temperature = %d, want 58", gpu.Temperature)
 	}
 }
 

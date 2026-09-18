@@ -114,10 +114,14 @@ func (m *Monitor) checkNode(nc config.NodeConfig) {
 	}
 
 	if gpuMetrics != nil {
-		node.GPUMemoryUsed = gpuMetrics.MemoryUsed
-		node.GPUMemoryTotal = gpuMetrics.MemoryTotal
-		node.GPUUtilization = gpuMetrics.Utilization
-		node.GPUTemperature = gpuMetrics.Temperature
+		node.GPUs = []GPUMetrics{
+			{
+				MemoryUsed:  gpuMetrics.MemoryUsed,
+				MemoryTotal: gpuMetrics.MemoryTotal,
+				Utilization: gpuMetrics.Utilization,
+				Temperature: gpuMetrics.Temperature,
+			},
+		}
 	}
 }
 
