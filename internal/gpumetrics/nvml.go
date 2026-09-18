@@ -37,28 +37,28 @@ func NewNVMLCollector() (*NVMLCollector, error) {
 	return &NVMLCollector{device: device}, nil
 }
 
-func (c *NVMLCollector) Collect() (GPUMetrics, error) {
+func (c *NVMLCollector) Collect() ([]GPUMetrics, error) {
 	memInfo, ret := c.device.GetMemoryInfo()
 	if ret != nvml.SUCCESS {
-		return GPUMetrics{}, fmt.Errorf("nvml get memory info failed: %s", nvml.ErrorString(ret))
+		return nil, fmt.Errorf("nvml get memory info failed: %s", nvml.ErrorString(ret))
 	}
 
 	util, ret := c.device.GetUtilizationRates()
 	if ret != nvml.SUCCESS {
-		return GPUMetrics{}, fmt.Errorf("nvml get utilization failed: %s", nvml.ErrorString(ret))
+		return nil, fmt.Errorf("nvml get utilization failed: %s", nvml.ErrorString(ret))
 	}
 
 	temp, ret := c.device.GetTemperature(nvml.TEMPERATURE_GPU)
 	if ret != nvml.SUCCESS {
-		return GPUMetrics{}, fmt.Errorf("nvml get temperature failed: %s", nvml.ErrorString(ret))
+		return nil, fmt.Errorf("nvml get temperature failed: %s", nvml.ErrorString(ret))
 	}
 
-	return GPUMetrics{
+	return []GPUMetrics{{
 		MemoryUsed:  memInfo.Used,
 		MemoryTotal: memInfo.Total,
 		Utilization: util.Gpu,
 		Temperature: uint32(temp),
-	}, nil
+	}}, nil
 }
 
 func (c *NVMLCollector) Close() {
