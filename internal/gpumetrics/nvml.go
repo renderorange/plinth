@@ -7,7 +7,7 @@ import (
 )
 
 type NVMLCollector struct {
-	device nvml.Device
+	devices []nvml.Device
 }
 
 func NewNVMLCollector() (*NVMLCollector, error) {
@@ -26,39 +26,51 @@ func NewNVMLCollector() (*NVMLCollector, error) {
 		return nil, fmt.Errorf("no GPU devices found")
 	}
 
-	// NOTE: only the first GPU (device index 0) is collected. Multi-GPU nodes
-	// will under-report memory/utilization/temperature for the remaining GPUs.
-	device, ret := nvml.DeviceGetHandleByIndex(0)
-	if ret != nvml.SUCCESS {
-		nvml.Shutdown()
-		return nil, fmt.Errorf("nvml device get handle failed: %s", nvml.ErrorString(ret))
+	devices := make([]nvml.Device, 0, count)
+	for i := 0; i < count; i++ {
+		device, ret := nvml.DeviceGetHandleByIndex(i)
+		if ret != nvml.SUCCESS {
+			nvml.Shutdown()
+			return nil, fmt.Errorf("nvml device %d get handle failed: %s", i, nvml.ErrorString(ret))
+		}
+		devices = append(devices, device)
 	}
 
-	return &NVMLCollector{device: device}, nil
+	return &NVMLCollector{devices: devices}, nil
 }
 
-func (c *NVMLCollector) Collect() (GPUMetrics, error) {
-	memInfo, ret := c.device.GetMemoryInfo()
-	if ret != nvml.SUCCESS {
-		return GPUMetrics{}, fmt.Errorf("nvml get memory info failed: %s", nvml.ErrorString(ret))
-	}
+func (c *NVMLCollector) Collect() ([]GPUMetrics, error) {
+	metrics := make([]GPUMetrics, 0, len(c.devices))
+	for i, device := range c.devices {
+		uuid, ret := device.GetUUID()
+		if ret != nvml.SUCCESS {
+			return nil, fmt.Errorf("nvml device %d get uuid failed: %s", i, nvml.ErrorString(ret))
+		}
 
-	util, ret := c.device.GetUtilizationRates()
-	if ret != nvml.SUCCESS {
-		return GPUMetrics{}, fmt.Errorf("nvml get utilization failed: %s", nvml.ErrorString(ret))
-	}
+		memInfo, ret := device.GetMemoryInfo()
+		if ret != nvml.SUCCESS {
+			return nil, fmt.Errorf("nvml device %d get memory info failed: %s", i, nvml.ErrorString(ret))
+		}
 
-	temp, ret := c.device.GetTemperature(nvml.TEMPERATURE_GPU)
-	if ret != nvml.SUCCESS {
-		return GPUMetrics{}, fmt.Errorf("nvml get temperature failed: %s", nvml.ErrorString(ret))
-	}
+		util, ret := device.GetUtilizationRates()
+		if ret != nvml.SUCCESS {
+			return nil, fmt.Errorf("nvml device %d get utilization failed: %s", i, nvml.ErrorString(ret))
+		}
 
-	return GPUMetrics{
-		MemoryUsed:  memInfo.Used,
-		MemoryTotal: memInfo.Total,
-		Utilization: util.Gpu,
-		Temperature: uint32(temp),
-	}, nil
+		temp, ret := device.GetTemperature(nvml.TEMPERATURE_GPU)
+		if ret != nvml.SUCCESS {
+			return nil, fmt.Errorf("nvml device %d get temperature failed: %s", i, nvml.ErrorString(ret))
+		}
+
+		metrics = append(metrics, GPUMetrics{
+			GPUUUID:     uuid,
+			MemoryUsed:  memInfo.Used,
+			MemoryTotal: memInfo.Total,
+			Utilization: util.Gpu,
+			Temperature: uint32(temp),
+		})
+	}
+	return metrics, nil
 }
 
 func (c *NVMLCollector) Close() {

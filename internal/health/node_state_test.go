@@ -73,3 +73,23 @@ func TestNodeStateTimestamp(t *testing.T) {
 		t.Error("LastCheck should not be zero")
 	}
 }
+
+func TestNodeStateGPUsField(t *testing.T) {
+	node := NodeState{
+		IP:   "10.0.0.1",
+		Name: "gpu-node-1",
+		GPUs: []GPUMetrics{
+			{UUID: "GPU-aaa", MemoryUsed: 100, MemoryTotal: 200, Utilization: 50, Temperature: 60},
+			{UUID: "GPU-bbb", MemoryUsed: 300, MemoryTotal: 400, Utilization: 70, Temperature: 80},
+		},
+	}
+	if len(node.GPUs) != 2 {
+		t.Fatalf("expected 2 GPUs, got %d", len(node.GPUs))
+	}
+	if node.GPUs[0].UUID != "GPU-aaa" {
+		t.Errorf("expected GPU-aaa, got %s", node.GPUs[0].UUID)
+	}
+	if node.GPUs[1].UUID != "GPU-bbb" {
+		t.Errorf("expected GPU-bbb, got %s", node.GPUs[1].UUID)
+	}
+}

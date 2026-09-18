@@ -23,16 +23,21 @@ func (s Status) String() string {
 	}
 }
 
+type GPUMetrics struct {
+	UUID        string
+	MemoryUsed  uint64
+	MemoryTotal uint64
+	Utilization uint32
+	Temperature uint32
+}
+
 type NodeState struct {
 	IP                  string
 	Name                string
 	Status              Status
 	LastCheck           time.Time
 	ConsecutiveFailures int
-	GPUMemoryUsed       uint64
-	GPUMemoryTotal      uint64
-	GPUUtilization      uint32
-	GPUTemperature      uint32
+	GPUs                []GPUMetrics
 }
 
 func computeStatus(consecutiveFailures, threshold int) Status {

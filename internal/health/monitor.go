@@ -114,14 +114,21 @@ func (m *Monitor) checkNode(nc config.NodeConfig) {
 	}
 
 	if gpuMetrics != nil {
-		node.GPUMemoryUsed = gpuMetrics.MemoryUsed
-		node.GPUMemoryTotal = gpuMetrics.MemoryTotal
-		node.GPUUtilization = gpuMetrics.Utilization
-		node.GPUTemperature = gpuMetrics.Temperature
+		node.GPUs = make([]GPUMetrics, len(gpuMetrics))
+		for i, gm := range gpuMetrics {
+			node.GPUs[i] = GPUMetrics{
+				UUID:        gm.GPUUUID,
+				MemoryUsed:  gm.MemoryUsed,
+				MemoryTotal: gm.MemoryTotal,
+				Utilization: gm.Utilization,
+				Temperature: gm.Temperature,
+			}
+		}
 	}
 }
 
 type gpuMetricsRaw struct {
+	GPUUUID     string
 	MemoryUsed  uint64
 	MemoryTotal uint64
 	Utilization uint32
@@ -137,7 +144,20 @@ func (m *Monitor) pingHealth(url string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func (m *Monitor) scrapeMetrics(url string) *gpuMetricsRaw {
+func extractGPUUUID(metricName string) string {
+	start := strings.Index(metricName, `gpu="`)
+	if start == -1 {
+		return ""
+	}
+	start += 5
+	end := strings.Index(metricName[start:], `"`)
+	if end == -1 {
+		return ""
+	}
+	return metricName[start : start+end]
+}
+
+func (m *Monitor) scrapeMetrics(url string) []gpuMetricsRaw {
 	resp, err := m.client.Get(url)
 	if err != nil {
 		return nil
@@ -153,37 +173,56 @@ func (m *Monitor) scrapeMetrics(url string) *gpuMetricsRaw {
 		return nil
 	}
 
-	metrics := &gpuMetricsRaw{}
-	found := false
+	gpuMap := make(map[string]*gpuMetricsRaw)
+
 	for _, line := range strings.Split(string(body), "\n") {
 		if strings.HasPrefix(line, "#") || line == "" {
 			continue
 		}
+
 		parts := strings.Fields(line)
 		if len(parts) != 2 {
 			continue
 		}
+
+		metricName := parts[0]
 		val, err := strconv.ParseFloat(parts[1], 64)
 		if err != nil {
 			continue
 		}
-		switch parts[0] {
+
+		uuid := extractGPUUUID(metricName)
+		if uuid == "" {
+			continue
+		}
+
+		gpu, ok := gpuMap[uuid]
+		if !ok {
+			gpu = &gpuMetricsRaw{GPUUUID: uuid}
+			gpuMap[uuid] = gpu
+		}
+
+		baseName := metricName[:strings.Index(metricName, "{")]
+
+		switch baseName {
 		case "gpu_memory_used_bytes":
-			metrics.MemoryUsed = uint64(val)
-			found = true
+			gpu.MemoryUsed = uint64(val)
 		case "gpu_memory_total_bytes":
-			metrics.MemoryTotal = uint64(val)
-			found = true
+			gpu.MemoryTotal = uint64(val)
 		case "gpu_utilization_percent":
-			metrics.Utilization = uint32(val)
-			found = true
+			gpu.Utilization = uint32(val)
 		case "gpu_temperature_celsius":
-			metrics.Temperature = uint32(val)
-			found = true
+			gpu.Temperature = uint32(val)
 		}
 	}
-	if !found {
+
+	if len(gpuMap) == 0 {
 		return nil
 	}
-	return metrics
+
+	result := make([]gpuMetricsRaw, 0, len(gpuMap))
+	for _, gpu := range gpuMap {
+		result = append(result, *gpu)
+	}
+	return result
 }

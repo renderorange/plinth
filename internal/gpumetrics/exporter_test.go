@@ -12,20 +12,21 @@ import (
 func TestExporterHandler(t *testing.T) {
 	tests := []struct {
 		name       string
-		collectFn  func() (GPUMetrics, error)
+		collectFn  func() ([]GPUMetrics, error)
 		wantCode   int
 		wantInBody []string
 		wantNotIn  []string
 	}{
 		{
 			name: "success returns metrics",
-			collectFn: func() (GPUMetrics, error) {
-				return GPUMetrics{
+			collectFn: func() ([]GPUMetrics, error) {
+				return []GPUMetrics{{
+					GPUUUID:     "GPU-test",
 					MemoryUsed:  536870912,
 					MemoryTotal: 12884901888,
 					Utilization: 45,
 					Temperature: 62,
-				}, nil
+				}}, nil
 			},
 			wantCode: 200,
 			wantInBody: []string{
@@ -37,8 +38,8 @@ func TestExporterHandler(t *testing.T) {
 		},
 		{
 			name: "collector error returns 500",
-			collectFn: func() (GPUMetrics, error) {
-				return GPUMetrics{}, fmt.Errorf("nvml error")
+			collectFn: func() ([]GPUMetrics, error) {
+				return nil, fmt.Errorf("nvml error")
 			},
 			wantCode:  500,
 			wantNotIn: []string{"gpu_memory_used_bytes"},
@@ -75,8 +76,8 @@ func TestExporterHandler(t *testing.T) {
 }
 
 func TestExporterHandlerContentType(t *testing.T) {
-	collector := NewCollector(func() (GPUMetrics, error) {
-		return GPUMetrics{MemoryUsed: 100}, nil
+	collector := NewCollector(func() ([]GPUMetrics, error) {
+		return []GPUMetrics{{GPUUUID: "GPU-ct", MemoryUsed: 100}}, nil
 	})
 	handler := makeHandler(collector)
 
@@ -91,8 +92,8 @@ func TestExporterHandlerContentType(t *testing.T) {
 }
 
 func TestExporterHealthEndpoint(t *testing.T) {
-	collector := NewCollector(func() (GPUMetrics, error) {
-		return GPUMetrics{}, nil
+	collector := NewCollector(func() ([]GPUMetrics, error) {
+		return []GPUMetrics{}, nil
 	})
 
 	exporter := NewExporter(collector)
@@ -115,13 +116,14 @@ func TestExporterHealthEndpoint(t *testing.T) {
 }
 
 func TestExporterHandlerIntegration(t *testing.T) {
-	collector := NewCollector(func() (GPUMetrics, error) {
-		return GPUMetrics{
+	collector := NewCollector(func() ([]GPUMetrics, error) {
+		return []GPUMetrics{{
+			GPUUUID:     "GPU-integ",
 			MemoryUsed:  1073741824,
 			MemoryTotal: 8589934592,
 			Utilization: 65,
 			Temperature: 58,
-		}, nil
+		}}, nil
 	})
 
 	exporter := NewExporter(collector)
@@ -142,10 +144,10 @@ func TestExporterHandlerIntegration(t *testing.T) {
 	bodyStr := string(body)
 
 	wantContains := []string{
-		"gpu_memory_used_bytes 1073741824",
-		"gpu_memory_total_bytes 8589934592",
-		"gpu_utilization_percent 65",
-		"gpu_temperature_celsius 58",
+		`gpu_memory_used_bytes{gpu="GPU-integ"} 1073741824`,
+		`gpu_memory_total_bytes{gpu="GPU-integ"} 8589934592`,
+		`gpu_utilization_percent{gpu="GPU-integ"} 65`,
+		`gpu_temperature_celsius{gpu="GPU-integ"} 58`,
 	}
 	for _, s := range wantContains {
 		if !strings.Contains(bodyStr, s) {
@@ -169,9 +171,32 @@ func TestExporterHandlerIntegration(t *testing.T) {
 	}
 }
 
+func TestExporterHandlerMultiGPU(t *testing.T) {
+	provider := NewCollector(func() ([]GPUMetrics, error) {
+		return []GPUMetrics{
+			{GPUUUID: "GPU-111", MemoryUsed: 1000, MemoryTotal: 2000, Utilization: 50, Temperature: 60},
+			{GPUUUID: "GPU-222", MemoryUsed: 3000, MemoryTotal: 4000, Utilization: 70, Temperature: 80},
+		}, nil
+	})
+	exporter := NewExporter(provider)
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	exporter.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `gpu_memory_used_bytes{gpu="GPU-111"} 1000`) {
+		t.Error("missing GPU-111 memory_used")
+	}
+	if !strings.Contains(body, `gpu_memory_used_bytes{gpu="GPU-222"} 3000`) {
+		t.Error("missing GPU-222 memory_used")
+	}
+}
+
 func TestExporterHandlerIntegrationError(t *testing.T) {
-	collector := NewCollector(func() (GPUMetrics, error) {
-		return GPUMetrics{}, fmt.Errorf("nvml init failed")
+	collector := NewCollector(func() ([]GPUMetrics, error) {
+		return nil, fmt.Errorf("nvml init failed")
 	})
 
 	exporter := NewExporter(collector)
