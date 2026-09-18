@@ -18,6 +18,7 @@ import (
 	"plinth/internal/health"
 	"plinth/internal/log"
 	"plinth/internal/metrics"
+	"plinth/internal/version"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -30,8 +31,14 @@ func main() {
 }
 
 func run() error {
+	showVersion := flag.Bool("version", false, "print version and exit")
 	configPath := flag.String("config", "config/gateway.toml", "path to config file")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version.String())
+		return nil
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
