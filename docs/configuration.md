@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Plinth uses TOML for configuration. The config file path is passed via the `-config` flag (default: `config/gateway.toml`).
+Plinth uses TOML for configuration. The config file path is passed via the `-config` flag (default: `config/gateway.toml`). The same file is shared by the gateway and `plinth-provision`.
 
 ## Example Configuration
 
@@ -51,6 +51,13 @@ ring = "ring-a"
 [[models.available]]
 name = "Qwen/Qwen2.5-7B-Instruct"
 pipeline_stages = 1
+
+[provision]
+weights_dir = "/var/lib/plinth/weights"
+ssh_key = "~/.ssh/id_rsa"
+# ssh_user = "root"
+# ssh_port = 22
+# ssh_host_key = "SHA256:..." # required for provision/weights push
 ```
 
 ## Sections
@@ -112,6 +119,24 @@ Available models. Add one `[[models.available]]` section per model.
 | `pipeline_stages` | int | No | `1` | Informational metadata only; not enforced by the gateway |
 | `ring` | string | No | — | Ring whose nodes serve this model. Requests round-robin among that ring's nodes. Empty routes to nodes without a ring |
 
+### `[provision]`
+
+Settings used by `plinth-provision` for SSH access and model weight transfer.
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `weights_dir` | string | No | `/var/lib/plinth/weights` | Local directory where model weights are downloaded (`weights pull`) and read from (`weights push`, `provision`) |
+| `ssh_key` | string | No | `~/.ssh/id_rsa` | Path to the SSH private key for node access |
+| `ssh_user` | string | No | `root` | SSH login user |
+| `ssh_port` | int | No | `22` | SSH port (must be 1–65535 when set) |
+| `ssh_host_key` | string | No | — | `SHA256` fingerprint of the node's host key, verified on every connection. **Required** for `provision` and `weights push`. Obtain with `ssh-keyscan -t ed25519 <node-ip>` |
+
+Notes:
+
+- `~` at the start of `weights_dir` and `ssh_key` is expanded to the current user's home directory at load time.
+- Connections are refused unless the node's presented host key matches `ssh_host_key`; there is no opt-out.
+- If `[provision]` is omitted, the defaults below are applied at load; the gateway ignores them, and `plinth-provision` refuses SSH connections until `ssh_host_key` is set.
+
 ## Environment Variables
 
 The gpu-exporter supports one environment variable:
@@ -132,6 +157,7 @@ The gateway validates at startup:
 - `health_interval` is a valid, positive Go duration (defaults to `3s` when omitted)
 - `health_fail_threshold` is greater than zero (defaults to `3` when omitted)
 - At least one node is configured
+- `ssh_port` is between 1 and 65535 when set (defaults to `22`)
 - Every model ring references a ring that at least one node belongs to
 - Every model without a ring has at least one ring-less node to serve it
 

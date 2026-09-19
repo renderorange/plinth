@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -225,6 +226,97 @@ func TestValidateStandaloneModelWithNoUngroupedNodes(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for standalone model when every node belongs to a ring")
+	}
+}
+
+func TestProvisionConfig(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{
+			HealthInterval:      3 * time.Second,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+		},
+		Provision: ProvisionConfig{
+			WeightsDir: "/var/lib/plinth/weights",
+			SSHKeyPath: "/home/user/.ssh/id_rsa",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestProvisionConfigDefaults(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{
+			HealthInterval:      3 * time.Second,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+	if cfg.Provision.WeightsDir != defaultWeightsDir {
+		t.Errorf("WeightsDir = %q, want %q", cfg.Provision.WeightsDir, defaultWeightsDir)
+	}
+	if wantKey := expandHome(defaultSSHKeyPath); cfg.Provision.SSHKeyPath != wantKey {
+		t.Errorf("SSHKeyPath = %q, want %q", cfg.Provision.SSHKeyPath, wantKey)
+	}
+	if cfg.Provision.SSHUser != "root" {
+		t.Errorf("SSHUser = %q, want %q", cfg.Provision.SSHUser, "root")
+	}
+	if cfg.Provision.SSHPort != 22 {
+		t.Errorf("SSHPort = %d, want 22", cfg.Provision.SSHPort)
+	}
+}
+
+func TestProvisionDefaultPathsExpandTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := &Config{
+		Gateway: GatewayConfig{
+			HealthInterval:      3 * time.Second,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+	wantKey := filepath.Join(home, ".ssh", "id_rsa")
+	if cfg.Provision.SSHKeyPath != wantKey {
+		t.Errorf("SSHKeyPath = %q, want %q", cfg.Provision.SSHKeyPath, wantKey)
+	}
+
+	cfg2 := &Config{
+		Gateway: GatewayConfig{
+			HealthInterval:      3 * time.Second,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+		},
+		Provision: ProvisionConfig{
+			WeightsDir: "~/weights",
+			SSHKeyPath: "//home/custom/key",
+		},
+	}
+	if err := cfg2.Validate(); err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+	if cfg2.Provision.WeightsDir != filepath.Join(home, "weights") {
+		t.Errorf("WeightsDir = %q, want %q", cfg2.Provision.WeightsDir, filepath.Join(home, "weights"))
+	}
+	if cfg2.Provision.SSHKeyPath != "//home/custom/key" {
+		t.Errorf("SSHKeyPath = %q, want unchanged absolute path", cfg2.Provision.SSHKeyPath)
 	}
 }
 

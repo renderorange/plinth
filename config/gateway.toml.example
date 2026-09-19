@@ -41,3 +41,10 @@ ring = "ring-a"
 [[models.available]]
 name = "Qwen/Qwen2.5-7B-Instruct"
 pipeline_stages = 1
+
+[provision]
+weights_dir = "/var/lib/plinth/weights"
+ssh_key = "~/.ssh/id_rsa"
+# ssh_user = "root"
+# ssh_port = 22
+# ssh_host_key = "SHA256:..." # required for provision/weights push; value from: ssh-keyscan -t ed25519 <node-ip>

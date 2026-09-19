@@ -15,6 +15,8 @@ const (
 	defaultFailThreshold  = 3
 	defaultVLLMPort       = 8000
 	defaultMetricsPort    = 9100
+	defaultWeightsDir     = "/var/lib/plinth/weights"
+	defaultSSHKeyPath     = "~/.ssh/id_rsa"
 )
 
 type rawConfig struct {
@@ -41,6 +43,13 @@ type rawConfig struct {
 			PipelineStages int    `toml:"pipeline_stages"`
 			Ring           string `toml:"ring"`
 		}
+	}
+	Provision struct {
+		WeightsDir string `toml:"weights_dir"`
+		SSHKeyPath string `toml:"ssh_key"`
+		SSHUser    string `toml:"ssh_user"`
+		SSHPort    int    `toml:"ssh_port"`
+		SSHHostKey string `toml:"ssh_host_key"`
 	}
 }
 
@@ -111,6 +120,14 @@ func Load(path string) (*Config, error) {
 			PipelineStages: m.PipelineStages,
 			Ring:           m.Ring,
 		})
+	}
+
+	cfg.Provision = ProvisionConfig{
+		WeightsDir: raw.Provision.WeightsDir,
+		SSHKeyPath: raw.Provision.SSHKeyPath,
+		SSHUser:    raw.Provision.SSHUser,
+		SSHPort:    raw.Provision.SSHPort,
+		SSHHostKey: raw.Provision.SSHHostKey,
 	}
 
 	if err := cfg.Validate(); err != nil {
