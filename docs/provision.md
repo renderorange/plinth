@@ -2,28 +2,36 @@
 
 ## Overview
 
-The `plinth provision` command sets up GPU nodes for running vLLM inference. It connects via SSH and runs a series of provisioners to install drivers, Python, vLLM, and copy model weights. Systemd service installation is handled separately by `scripts/provision-node.sh`.
+The `plinth-provision provision` command sets up GPU nodes for running vLLM inference. It connects via SSH and runs a series of provisioners to install drivers, Python, vLLM, and copy model weights. Run `plinth-provision weights pull <model>` first so the models step has local weights to push. Systemd service installation is handled separately by `scripts/provision-node.sh`.
 
 ## Commands
 
-### `plinth provision`
+### `plinth-provision provision`
 
 Full node provisioning:
 
 ```bash
-plinth provision <node-name> [<node-name>...]   # specific nodes
-plinth provision --all                           # all configured nodes
+plinth-provision provision <node-name> [<node-name>...]   # specific nodes
+plinth-provision provision --all                           # all configured nodes
 ```
 
-### `plinth weights`
+`--all` cannot be combined with named nodes.
+
+### `plinth-provision weights`
 
 Model weight management:
 
 ```bash
-plinth weights pull <model>                          # download to controller
-plinth weights push <model> [<node-name>...]         # push to specific nodes
-plinth weights push <model> --all                    # push to all nodes serving that model
+plinth-provision weights pull <model>                        # download to controller
+plinth-provision weights push <model> [<node-name>...]       # push to specific nodes
+plinth-provision weights push <model> --all                  # push to all nodes serving that model
 ```
+
+Behavior notes:
+
+- `weights push --all` requires the model to be listed in `[[models.available]]`; ring models go to their ring's nodes, ring-less models to standalone nodes.
+- Model names are restricted to letters, digits, and `._-/`; path traversal (`..`) and shell metacharacters are rejected.
+- Downloads are atomic: an interrupted `pull` leaves no partial model directory, and re-running completes the download.
 
 ## Provisioner Pipeline
 

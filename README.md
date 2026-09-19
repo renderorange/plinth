@@ -35,7 +35,7 @@ Plinth sits in front of multiple vLLM instances and provides:
 
 Each GPU node runs:
 - **vLLM** — LLM inference server (default port 8000)
-- **gpu-exporter** — Prometheus exporter for NVIDIA GPU metrics (default port 9100)
+- **gpu-exporter** — Per-GPU Prometheus metrics (memory, utilization, temperature) for all NVIDIA GPUs, UUID-labeled (default port 9100)
 
 ## Quick Start
 
@@ -48,19 +48,21 @@ Each GPU node runs:
 ### Build
 
 ```bash
-# Build both binaries
+# Build all binaries (gateway, gpu-exporter, plinth-provision)
 make all
 
 # Or build individually
 make build-gateway
 make build-gpu-exporter
+make build-provision
 
 # Or use go directly
 go build -o gateway ./cmd/gateway
 go build -o gpu-exporter ./cmd/gpu-exporter
+go build -o plinth-provision ./cmd/provision
 ```
 
-The Makefile also provides: `test`, `vet`, `fmt`, `cover`, `clean`, and versioned build targets (`build-gateway-versioned`, `build-gpu-exporter-versioned`) that inject git commit hash and build time.
+The Makefile also provides: `test`, `vet`, `fmt`, `cover`, `clean`, and versioned build targets (`build-gateway-versioned`, `build-gpu-exporter-versioned`, `build-provision-versioned`) that inject git commit hash and build time.
 
 ### Configure
 
@@ -100,7 +102,7 @@ Set `[provision] ssh_host_key` in `config/gateway.toml` first (the `SHA256` fing
 ./plinth-provision -config config/gateway.toml weights push Qwen/Qwen2.5-7B-Instruct --all
 ```
 
-Node provisioning installs drivers, Python, vLLM, the service user, and model weights. Systemd service installation is handled separately by `scripts/provision-node.sh`.
+Node provisioning installs drivers, Python, vLLM, the service user, and model weights. Run `weights pull <model>` before `provision` so the models step has local weights to push. `weights push --all` requires the model to be listed in `[[models.available]]`. Systemd service installation is handled separately by `scripts/provision-node.sh`.
 
 ## Configuration
 
@@ -177,7 +179,7 @@ Deployment scripts are provided in `scripts/`:
 GitHub Actions workflows in `.github/workflows/`:
 
 - **PR checks** (`pr.yml`) — Runs `go vet`, tests with race detector, and builds gateway + gpu-exporter on linux/amd64 and linux/arm64
-- **Release** (`release.yml`) — On merge to main: runs tests, builds versioned binaries, creates a GitHub release with commit hash version, and attaches all binaries
+- **Release** (`release.yml`) — On merge to main: runs tests, builds versioned gateway + gpu-exporter binaries, creates a GitHub release with commit hash version, and attaches the built binaries
 
 ## Project Structure
 
@@ -185,7 +187,8 @@ GitHub Actions workflows in `.github/workflows/`:
 plinth/
 ├── cmd/
 │   ├── gateway/         # Gateway binary
-│   └── gpu-exporter/    # GPU metrics exporter
+│   ├── gpu-exporter/    # GPU metrics exporter
+│   └── provision/       # Node provisioning + model weights CLI
 ├── config/              # Configuration files
 ├── docs/                # Detailed documentation
 ├── .github/workflows/   # CI/CD (PR checks + release)
@@ -197,6 +200,7 @@ plinth/
 │   ├── health/          # Node health monitoring
 │   ├── log/             # Structured logging
 │   ├── metrics/         # Prometheus gateway metrics
+│   ├── provision/       # SSH client, provisioners, weight manager
 │   └── version/         # Build version info
 ├── Makefile             # Build, test, and utility targets
 └── scripts/             # Deployment scripts
@@ -207,8 +211,8 @@ plinth/
 - **No runtime config reload** — Config changes require a restart. SIGHUP is not supported because the monitor, handler, and servers do not support runtime config propagation.
 - **No per-node model awareness** — Routing uses ring membership from config: ring models round-robin among that ring's nodes, all other models round-robin among ring-less nodes. The gateway does not verify which models each node actually serves.
 - **No streaming support** — The proxy buffers full responses; SSE streaming is not yet implemented.
-- **Multi-GPU support** — The gpu-exporter now collects metrics from all NVIDIA GPUs on a node, exposing them with UUID-based labels in Prometheus format.
 - **No retry on proxy failure** — If a selected node fails mid-request, the request is not retried on another healthy node.
+- **Provisioning** — `plinth provision` installs drivers, Python, vLLM, the service user, and model weights, but not systemd services; service setup remains in `scripts/provision-node.sh`.
 
 ## License and Copyright
 

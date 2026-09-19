@@ -9,17 +9,20 @@ This document describes how to deploy plinth in a production environment.
 - Go 1.22+ for building
 - SSH access to all nodes
 - rsync for model weight transfer
+- Each node's SSH host key fingerprint (for `plinth-provision`): `ssh-keyscan -t ed25519 <node-ip>`
 
 ## Deployment Steps
 
 ### 1. Build Binaries
 
 ```bash
-# Build gateway
-go build -o gateway ./cmd/gateway
+# Build all binaries (gateway, gpu-exporter, plinth-provision)
+make all
 
-# Build gpu-exporter
+# Or build individually
+go build -o gateway ./cmd/gateway
 go build -o gpu-exporter ./cmd/gpu-exporter
+go build -o plinth-provision ./cmd/provision
 ```
 
 ### 2. Configure Gateway
@@ -29,11 +32,27 @@ cp config/gateway.toml.example config/gateway.toml
 # Edit config/gateway.toml with your cluster settings
 ```
 
-See [configuration.md](configuration.md) for detailed config reference.
+For `plinth-provision`, set `[provision]` in the same file — at minimum `ssh_host_key` with each node's fingerprint. See [configuration.md](configuration.md) for detailed config reference.
 
 ### 3. Provision GPU Nodes
 
-Use the provided script to provision each GPU node:
+Two complementary options:
+
+**Option A — `plinth-provision` (package installs + model weights):**
+
+```bash
+# Download model weights to the controller first
+./plinth-provision -config config/gateway.toml weights pull Qwen/Qwen2.5-7B-Instruct
+
+# Provision a specific node (installs drivers, Python, vLLM, the vllm
+# service user, and pushes the configured model weights to the node)
+./plinth-provision -config config/gateway.toml provision gpu-node-1
+
+# Or provision all nodes
+./plinth-provision -config config/gateway.toml provision --all
+```
+
+**Option B — `scripts/provision-node.sh` (full node setup including services):**
 
 ```bash
 ./scripts/provision-node.sh <node-ip>
@@ -46,6 +65,8 @@ This script:
 4. Copies model weights from `/opt/models/`
 5. Installs and starts the vLLM systemd service
 6. Installs and starts the gpu-exporter systemd service
+
+`plinth provision` covers steps 1–3 and pushes weights via rsync but does not install systemd services; use the script for service setup or install the units from `scripts/` manually.
 
 ### 4. Set Up Gateway
 

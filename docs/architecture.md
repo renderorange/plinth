@@ -21,9 +21,19 @@ The main gateway process that:
 
 A standalone process that runs on each GPU node and:
 
-1. Reads NVIDIA GPU metrics via NVML
+1. Reads NVIDIA GPU metrics via NVML (all GPUs, UUID-labeled)
 2. Exposes metrics in Prometheus format (default `:9100`)
 3. Provides a `/health` endpoint for liveness checks
+
+### plinth-provision (`cmd/provision/`)
+
+A CLI that runs on the controller to set up GPU nodes over SSH:
+
+1. `provision` — Runs the provisioner pipeline per node: drivers, python, vllm, user, models
+2. `weights pull` — Downloads model weights to the controller
+3. `weights push` — rsyncs weights to named nodes, or to all nodes serving a model when `--all` is used
+
+Connections verify the node's host key against `[provision] ssh_host_key` before running anything. Systemd service installation is handled by `scripts/provision-node.sh`, not by this CLI.
 
 ## Internal Packages
 
@@ -79,13 +89,23 @@ Prometheus metrics for the gateway:
 - `gateway_request_duration_seconds` — Histogram for request latency
 - `gateway_requests_total` — Counter for requests by model and status
 
+### `internal/provision/`
+
+Node provisioning support for `plinth-provision`:
+
+- `ssh.go` — SSH client with key auth, fingerprint-pinned host key verification, and context-cancelable command execution
+- `provisioner.go` — Provisioner interface and registry; `RunAll` executes steps in order and short-circuits on the first error
+- `drivers.go`, `python.go`, `vllm.go`, `user.go` — Package install steps run over SSH
+- `models.go` — Picks the model whose ring matches the node's ring and pushes it
+- `weights.go` — Weight manager: `huggingface-cli` downloads into `weights_dir`, atomic on completion; rsync push to nodes
+
 ### `internal/version/`
 
 Build version information:
 
 - Stores version, commit hash, and build time
 - Injected via `-ldflags` at build time
-- Exposed via `--version` flag on both binaries
+- Exposed via `--version` flag on all binaries
 
 ## Request Flow
 
