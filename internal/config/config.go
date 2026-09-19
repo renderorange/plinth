@@ -2,14 +2,18 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
 type Config struct {
-	Cluster ClusterConfig
-	Gateway GatewayConfig
-	Nodes   []NodeConfig
-	Models  ModelsConfig
+	Cluster   ClusterConfig
+	Gateway   GatewayConfig
+	Nodes     []NodeConfig
+	Models    ModelsConfig
+	Provision ProvisionConfig
 }
 
 type ClusterConfig struct {
@@ -42,6 +46,14 @@ type ModelConfig struct {
 	Ring           string `toml:"ring"`
 }
 
+type ProvisionConfig struct {
+	WeightsDir string `toml:"weights_dir"`
+	SSHKeyPath string `toml:"ssh_key"`
+	SSHUser    string `toml:"ssh_user"`
+	SSHPort    int    `toml:"ssh_port"`
+	SSHHostKey string `toml:"ssh_host_key"`
+}
+
 func (c *Config) Validate() error {
 	if c.Gateway.HealthInterval <= 0 {
 		return fmt.Errorf("health_interval must be greater than zero")
@@ -52,6 +64,24 @@ func (c *Config) Validate() error {
 	if len(c.Nodes) == 0 {
 		return fmt.Errorf("at least one node must be configured")
 	}
+
+	if c.Provision.WeightsDir == "" {
+		c.Provision.WeightsDir = defaultWeightsDir
+	}
+	if c.Provision.SSHKeyPath == "" {
+		c.Provision.SSHKeyPath = defaultSSHKeyPath
+	}
+	if c.Provision.SSHUser == "" {
+		c.Provision.SSHUser = "root"
+	}
+	if c.Provision.SSHPort == 0 {
+		c.Provision.SSHPort = 22
+	}
+	if c.Provision.SSHPort < 1 || c.Provision.SSHPort > 65535 {
+		return fmt.Errorf("ssh_port must be between 1 and 65535")
+	}
+	c.Provision.WeightsDir = expandHome(c.Provision.WeightsDir)
+	c.Provision.SSHKeyPath = expandHome(c.Provision.SSHKeyPath)
 
 	ringMembers := make(map[string]bool)
 	hasStandaloneNode := false
@@ -92,4 +122,15 @@ func (c *Config) ModelRing(modelName string) string {
 		}
 	}
 	return ""
+}
+
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[1:])
 }
