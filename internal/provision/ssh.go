@@ -1,0 +1,135 @@
+package provision
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+)
+
+type SSHConfig struct {
+	KeyPath string
+	User    string
+	Timeout time.Duration
+	Port    int
+	HostKey string
+}
+
+func (c SSHConfig) withDefaults() SSHConfig {
+	if c.User == "" {
+		c.User = "root"
+	}
+	if c.Port == 0 {
+		c.Port = 22
+	}
+	if c.Timeout == 0 {
+		c.Timeout = 30 * time.Second
+	}
+	return c
+}
+
+type SSHClient struct {
+	client *ssh.Client
+	config SSHConfig
+}
+
+func NewSSHClient(host string, cfg SSHConfig) (*SSHClient, error) {
+	cfg = cfg.withDefaults()
+
+	expected, err := normalizeHostKeyFingerprint(cfg.HostKey)
+	if err != nil {
+		return nil, err
+	}
+	if expected == "" {
+		return nil, fmt.Errorf("SSH host key fingerprint required; set [provision] ssh_host_key to the value printed by 'ssh-keyscan -t ed25519 %s'", host)
+	}
+
+	key, err := os.ReadFile(cfg.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading SSH key: %w", err)
+	}
+
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("parsing SSH key: %w", err)
+	}
+
+	sshCfg := &ssh.ClientConfig{
+		User: cfg.User,
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+		},
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			got := ssh.FingerprintSHA256(key)
+			if !strings.EqualFold(got, expected) {
+				return fmt.Errorf("host key fingerprint mismatch: got %s, want %s", got, expected)
+			}
+			return nil
+		},
+		Timeout: cfg.Timeout,
+	}
+
+	addr := net.JoinHostPort(host, strconv.Itoa(cfg.Port))
+	client, err := ssh.Dial("tcp", addr, sshCfg)
+	if err != nil {
+		return nil, fmt.Errorf("SSH dial: %w", err)
+	}
+
+	return &SSHClient{
+		client: client,
+		config: cfg,
+	}, nil
+}
+
+func normalizeHostKeyFingerprint(fp string) (string, error) {
+	fp = strings.TrimSpace(fp)
+	if fp == "" {
+		return "", nil
+	}
+	if len(fp) >= 7 && strings.EqualFold(fp[:7], "SHA256:") {
+		fp = fp[7:]
+	}
+	fp = strings.TrimRight(fp, "=")
+	if fp == "" {
+		return "", fmt.Errorf("invalid ssh_host_key: expected base64 after SHA256: prefix")
+	}
+	return "SHA256:" + strings.ToUpper(fp), nil
+}
+
+func (c *SSHClient) Run(ctx context.Context, command string) (string, error) {
+	session, err := c.client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("creating session: %w", err)
+	}
+	defer session.Close()
+
+	done := make(chan struct{})
+	var output []byte
+	var runErr error
+
+	go func() {
+		output, runErr = session.CombinedOutput(command)
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		session.Signal(ssh.SIGKILL)
+		<-done
+		return "", ctx.Err()
+	case <-done:
+		if runErr != nil {
+			return string(output), fmt.Errorf("running command: %w", runErr)
+		}
+		return string(output), nil
+	}
+}
+
+func (c *SSHClient) Close() error {
+	return c.client.Close()
+}
