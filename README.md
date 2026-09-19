@@ -79,6 +79,29 @@ cp config/gateway.toml.example config/gateway.toml
 ./gpu-exporter
 ```
 
+### Provision Nodes
+
+Set `[provision] ssh_host_key` in `config/gateway.toml` first (the `SHA256` fingerprint printed by `ssh-keyscan -t ed25519 <node-ip>`). Then:
+
+```bash
+# Provision a specific node
+./plinth-provision -config config/gateway.toml provision gpu-node-1
+
+# Provision all nodes
+./plinth-provision -config config/gateway.toml provision --all
+
+# Download model weights to controller
+./plinth-provision -config config/gateway.toml weights pull Qwen/Qwen2.5-7B-Instruct
+
+# Push weights to specific nodes
+./plinth-provision -config config/gateway.toml weights push Qwen/Qwen2.5-7B-Instruct gpu-node-1
+
+# Push weights to all nodes serving that model
+./plinth-provision -config config/gateway.toml weights push Qwen/Qwen2.5-7B-Instruct --all
+```
+
+Node provisioning installs drivers, Python, vLLM, the service user, and model weights. Systemd service installation is handled separately by `scripts/provision-node.sh`.
+
 ## Configuration
 
 See [config/gateway.toml.example](config/gateway.toml.example) for a complete example.
@@ -99,6 +122,11 @@ See [config/gateway.toml.example](config/gateway.toml.example) for a complete ex
 | `[[models.available]]` | `name` | Model identifier | — |
 | `[[models.available]]` | `pipeline_stages` | Informational metadata only | `1` |
 | `[[models.available]]` | `ring` | Ring whose nodes serve this model (empty for standalone) | — |
+| `[provision]` | `weights_dir` | Local path for model weights | `/var/lib/plinth/weights` |
+| `[provision]` | `ssh_key` | Path to SSH private key | `~/.ssh/id_rsa` |
+| `[provision]` | `ssh_user` | SSH login user | `root` |
+| `[provision]` | `ssh_port` | SSH port | `22` |
+| `[provision]` | `ssh_host_key` | Node host key fingerprint (required for provision/weights push) | — |
 
 ## API Endpoints
 

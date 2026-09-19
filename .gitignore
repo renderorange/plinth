@@ -21,6 +21,7 @@ tags
 [._]*.un~
 
 tmp
+.tmp
 .opencode
 .agents
 docs/superpowers/
@@ -32,6 +33,7 @@ config/gateway.toml
 # Binary
 /gateway
 /gpu-exporter
+/plinth-provision
 
 # Go
 *.exe
