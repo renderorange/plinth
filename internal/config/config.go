@@ -65,6 +65,14 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("at least one node must be configured")
 	}
 
+	seen := make(map[string]bool)
+	for _, n := range c.Nodes {
+		if seen[n.IP] {
+			return fmt.Errorf("duplicate node IP %q: plinth node identity is IP-based", n.IP)
+		}
+		seen[n.IP] = true
+	}
+
 	if c.Provision.WeightsDir == "" {
 		c.Provision.WeightsDir = defaultWeightsDir
 	}

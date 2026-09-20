@@ -343,6 +343,22 @@ func TestNodesInRing(t *testing.T) {
 	}
 }
 
+func TestValidateDuplicateNodeIPs(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes: []NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1", VLLMPort: 8000, MetricsPort: 9100},
+			{IP: "10.0.0.1", Name: "node-2", VLLMPort: 8001, MetricsPort: 9101},
+		},
+		Models: ModelsConfig{
+			Available: []ModelConfig{{Name: "test/model", PipelineStages: 1}},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for duplicate node IPs, got nil")
+	}
+}
+
 func TestModelRing(t *testing.T) {
 	cfg := &Config{
 		Models: ModelsConfig{
