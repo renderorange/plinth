@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"plinth/internal/config"
+	"plinth/internal/metrics"
+
+	dto "github.com/prometheus/client_model/go"
 )
 
 func waitForCondition(t *testing.T, timeout time.Duration, desc string, check func() bool) {
@@ -737,6 +740,46 @@ func (p *panicOnceTransport) RoundTrip(req *http.Request) (*http.Response, error
 		panic("injected probe panic")
 	}
 	return p.inner.RoundTrip(req)
+}
+
+type alwaysPanicTransport struct{}
+
+func (p *alwaysPanicTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	panic("injected probe panic")
+}
+
+func TestPanicIncrementsPanicsCounter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "127.0.0.1", Name: "n", VLLMPort: extractPort(srv.URL), MetricsPort: 1}},
+	}
+	mon := NewMonitor(cfg)
+	mon.client.Transport = &alwaysPanicTransport{}
+
+	before := &dto.Metric{}
+	if err := metrics.HealthCheckPanicsTotal.Write(before); err != nil {
+		t.Fatalf("HealthCheckPanicsTotal not registered: %v", err)
+	}
+	beforeVal := before.GetCounter().GetValue()
+
+	mon.checkAll()
+	mon.checkAll()
+
+	after := &dto.Metric{}
+	if err := metrics.HealthCheckPanicsTotal.Write(after); err != nil {
+		t.Fatalf("HealthCheckPanicsTotal not registered: %v", err)
+	}
+	if got := after.GetCounter().GetValue() - beforeVal; got != 2 {
+		t.Errorf("HealthCheckPanicsTotal delta = %f, want 2", got)
+	}
+	if got := mon.GetNodeStates()[0].LastCheck; !got.IsZero() {
+		t.Errorf("LastCheck = %v, want zero", got)
+	}
 }
 
 func TestCheckGuardClearedOnPanic(t *testing.T) {

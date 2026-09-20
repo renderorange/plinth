@@ -12,6 +12,7 @@ import (
 
 	"plinth/internal/config"
 	"plinth/internal/log"
+	"plinth/internal/metrics"
 )
 
 type Monitor struct {
@@ -112,6 +113,7 @@ func (m *Monitor) loop() {
 func (m *Monitor) runCheck(nc config.NodeConfig) {
 	defer func() {
 		if r := recover(); r != nil {
+			metrics.HealthCheckPanicsTotal.Inc()
 			log.Error("health check panicked", "node", nc.IP, "panic", fmt.Sprint(r))
 		}
 	}()

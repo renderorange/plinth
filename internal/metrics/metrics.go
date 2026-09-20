@@ -30,6 +30,10 @@ var (
 		Name: "gateway_proxy_attempts_total",
 		Help: "Proxy attempts by model and observed status",
 	}, []string{"model", "status"})
+	HealthCheckPanicsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "health_check_panics_total",
+		Help: "Total health probe panics recovered by the monitor",
+	})
 )
 
 func init() {
@@ -39,4 +43,5 @@ func init() {
 	prometheus.MustRegister(RequestDuration)
 	prometheus.MustRegister(RequestsTotal)
 	prometheus.MustRegister(ProxyAttemptsTotal)
+	prometheus.MustRegister(HealthCheckPanicsTotal)
 }
