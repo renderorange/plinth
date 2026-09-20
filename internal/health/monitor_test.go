@@ -2,6 +2,7 @@ package health
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -623,6 +624,63 @@ func TestCheckAllSkipsNodeWithInFlightRecheck(t *testing.T) {
 	}
 	if got := hits.Load(); got != 1 {
 		t.Errorf("health endpoint hits = %d, want 1", got)
+	}
+}
+
+func newServerOnIP(t *testing.T, ip string, handler http.Handler) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(handler)
+	l, err := net.Listen("tcp", ip+":0")
+	if err != nil {
+		t.Fatalf("listen on %s: %v", ip, err)
+	}
+	srv.Listener = l
+	srv.Start()
+	return srv
+}
+
+func TestCheckAllDoesNotStallOnSlowNode(t *testing.T) {
+	slow := newServerOnIP(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer slow.Close()
+
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fast.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.2", Name: "slow", VLLMPort: extractPort(slow.URL), MetricsPort: 1}, // slow node first to make sequential checks stall
+			{IP: "127.0.0.1", Name: "fast", VLLMPort: extractPort(fast.URL), MetricsPort: 1},
+		},
+	}
+	mon := NewMonitor(cfg)
+
+	done := make(chan struct{})
+	go func() { mon.checkAll(); close(done) }()
+
+	waitForCondition(t, time.Second, "fast node updated while slow node in flight", func() bool {
+		for _, st := range mon.GetNodeStates() {
+			if st.IP == "127.0.0.1" && !st.LastCheck.IsZero() {
+				return true
+			}
+		}
+		return false
+	})
+
+	select {
+	case <-done:
+	case <-time.After(4 * time.Second):
+		t.Fatal("checkAll did not return after slow node finished")
+	}
+	for _, st := range mon.GetNodeStates() {
+		if st.IP == "127.0.0.2" && st.LastCheck.IsZero() {
+			t.Error("slow node was never checked")
+		}
 	}
 }
 

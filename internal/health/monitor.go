@@ -104,9 +104,15 @@ func (m *Monitor) loop() {
 }
 
 func (m *Monitor) checkAll() {
+	var wg sync.WaitGroup
 	for _, nc := range m.cfg.Nodes {
-		m.checkNode(nc)
+		wg.Add(1)
+		go func(nc config.NodeConfig) {
+			defer wg.Done()
+			m.checkNode(nc)
+		}(nc)
 	}
+	wg.Wait()
 }
 
 func (m *Monitor) checkNode(nc config.NodeConfig) {
