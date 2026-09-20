@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"plinth/internal/config"
 )
 
 type SSHConfig struct {
@@ -18,6 +20,15 @@ type SSHConfig struct {
 	Timeout time.Duration
 	Port    int
 	HostKey string
+}
+
+func SSHConfigFrom(cfg config.ProvisionConfig) SSHConfig {
+	return SSHConfig{
+		KeyPath: cfg.SSHKeyPath,
+		User:    cfg.SSHUser,
+		Port:    cfg.SSHPort,
+		HostKey: cfg.SSHHostKey,
+	}
 }
 
 func (c SSHConfig) withDefaults() SSHConfig {

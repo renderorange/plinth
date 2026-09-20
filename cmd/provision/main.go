@@ -49,15 +49,6 @@ func run() error {
 	}
 }
 
-func sshConfigFrom(cfg config.ProvisionConfig) provision.SSHConfig {
-	return provision.SSHConfig{
-		KeyPath: cfg.SSHKeyPath,
-		User:    cfg.SSHUser,
-		Port:    cfg.SSHPort,
-		HostKey: cfg.SSHHostKey,
-	}
-}
-
 func runProvision(configPath string, args []string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -94,7 +85,7 @@ func runProvision(configPath string, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	sshCfg := sshConfigFrom(cfg.Provision)
+	sshCfg := provision.SSHConfigFrom(cfg.Provision)
 	weightMgr := provision.NewWeightManager(cfg.Provision.WeightsDir)
 
 	for _, node := range nodes {
@@ -197,7 +188,7 @@ func runWeights(configPath string, args []string) error {
 			return fmt.Errorf("no nodes specified; use --all or specify node names")
 		}
 
-		sshCfg := sshConfigFrom(cfg.Provision)
+		sshCfg := provision.SSHConfigFrom(cfg.Provision)
 
 		for _, node := range nodes {
 			if err := weightMgr.Push(context.Background(), modelName, node, sshCfg); err != nil {
