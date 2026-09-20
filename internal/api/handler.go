@@ -7,31 +7,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"plinth/internal/balancer"
 	"plinth/internal/config"
 	"plinth/internal/health"
+	"plinth/internal/log"
 	"plinth/internal/metrics"
 )
 
 var maxBodyBytes int64 = 32 << 20
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (sr *statusRecorder) WriteHeader(code int) {
-	sr.status = code
-	sr.ResponseWriter.WriteHeader(code)
-}
-
-func (sr *statusRecorder) Flush() {
-	if f, ok := sr.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-}
 
 type Handler struct {
 	cfg        *config.Config
@@ -40,6 +26,7 @@ type Handler struct {
 	mux        *http.ServeMux
 	rings      map[string]map[string]bool
 	standalone map[string]bool
+	offline    *offlineSet
 }
 
 func NewHandler(cfg *config.Config, mon *health.Monitor, bal *balancer.Balancer) *Handler {
@@ -64,12 +51,60 @@ func NewHandler(cfg *config.Config, mon *health.Monitor, bal *balancer.Balancer)
 		mux:        http.NewServeMux(),
 		rings:      rings,
 		standalone: standalone,
+		offline:    newOfflineSet(),
 	}
 	h.mux.HandleFunc("GET /health", h.handleHealth)
 	h.mux.HandleFunc("GET /v1/models", h.handleModels)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.handleChatCompletions)
 	h.mux.HandleFunc("POST /v1/completions", h.handleCompletions)
 	return h
+}
+
+type offlineSet struct {
+	mu    sync.Mutex
+	until map[string]time.Time
+}
+
+func newOfflineSet() *offlineSet {
+	return &offlineSet{until: make(map[string]time.Time)}
+}
+
+func (o *offlineSet) skip(ip string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	now := time.Now()
+	if t, ok := o.until[ip]; ok {
+		if t.After(now) {
+			return true
+		}
+		delete(o.until, ip)
+	}
+	return false
+}
+
+func (o *offlineSet) mark(ip string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if t, ok := o.until[ip]; ok && t.After(time.Now()) {
+		return false
+	}
+	o.until[ip] = time.Now().Add(offlineTTL)
+	return true
+}
+
+func (o *offlineSet) clear(ip string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.until, ip)
+}
+
+func portForNode(cfg *config.Config, ip string) (int, bool) {
+	for _, nc := range cfg.Nodes {
+		if nc.IP == ip {
+			return nc.VLLMPort, true
+		}
+	}
+	return 0, false
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -188,39 +223,74 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 
 	states := h.mon.GetNodeStates()
 	filtered := h.filterByRing(states, modelName)
-	node, err := h.bal.Select(filtered)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("no healthy node available: %v", err), http.StatusServiceUnavailable)
+	if len(filtered) == 0 {
+		http.Error(w, "no healthy node available", http.StatusServiceUnavailable)
 		metrics.RequestDuration.Observe(time.Since(start).Seconds())
 		metrics.RequestsTotal.WithLabelValues(modelName, "503").Inc()
 		return
 	}
 
-	var port int
-	found := false
-	for _, nc := range h.cfg.Nodes {
-		if nc.IP == node.IP {
-			port = nc.VLLMPort
-			found = true
+	tried := make(map[string]bool)
+	for i := 0; i < len(filtered); i++ {
+		node, err := h.bal.Select(filtered)
+		if err != nil {
 			break
 		}
-	}
-	if !found {
-		http.Error(w, "selected node not found in configuration", http.StatusInternalServerError)
-		metrics.RequestDuration.Observe(time.Since(start).Seconds())
-		metrics.RequestsTotal.WithLabelValues(modelName, "500").Inc()
-		return
+		if tried[node.IP] || h.offline.skip(node.IP) {
+			continue
+		}
+		tried[node.IP] = true
+
+		port, ok := portForNode(h.cfg, node.IP)
+		if !ok {
+			http.Error(w, "selected node not found in configuration", http.StatusInternalServerError)
+			metrics.RequestDuration.Observe(time.Since(start).Seconds())
+			metrics.RequestsTotal.WithLabelValues(modelName, "500").Inc()
+			return
+		}
+
+		r.Body = io.NopCloser(bytes.NewReader(forwardRaw))
+		if len(forwardRaw) != len(raw) {
+			r.ContentLength = int64(len(forwardRaw))
+		}
+
+		res, err := proxyAttempt(r, node.IP, port, path)
+		if err != nil {
+			http.Error(w, "failed to parse proxy target URL", http.StatusInternalServerError)
+			metrics.RequestDuration.Observe(time.Since(start).Seconds())
+			metrics.RequestsTotal.WithLabelValues(modelName, "500").Inc()
+			return
+		}
+
+		switch classifyProxyError(res.err) {
+		case outcomeOK:
+			h.offline.clear(node.IP)
+			commitResponse(w, res)
+			metrics.RequestDuration.Observe(time.Since(start).Seconds())
+			metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", res.status)).Inc()
+			metrics.ProxyAttemptsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", res.status)).Inc()
+			return
+		case outcomeRetry:
+			log.Info("retrying after connection failure", "node", node.IP, "error", res.err.Error())
+			metrics.ProxyAttemptsTotal.WithLabelValues(modelName, "502").Inc()
+			if h.offline.mark(node.IP) {
+				h.mon.Recheck(node.IP)
+			}
+		case outcomeFail:
+			log.Error("node response truncated or connection lost", "node", node.IP, "error", res.err.Error())
+			metrics.ProxyAttemptsTotal.WithLabelValues(modelName, "502").Inc()
+			http.Error(w, "upstream node error", http.StatusBadGateway)
+			metrics.RequestDuration.Observe(time.Since(start).Seconds())
+			metrics.RequestsTotal.WithLabelValues(modelName, "502").Inc()
+			return
+		case outcomeClientAborted:
+			return
+		}
 	}
 
-	r.Body = io.NopCloser(bytes.NewReader(forwardRaw))
-	if len(forwardRaw) != len(raw) {
-		r.ContentLength = int64(len(forwardRaw))
-	}
-	sr := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	proxyRequest(sr, r, node.IP, port, path)
-
+	http.Error(w, "no reachable node available", http.StatusServiceUnavailable)
 	metrics.RequestDuration.Observe(time.Since(start).Seconds())
-	metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", sr.status)).Inc()
+	metrics.RequestsTotal.WithLabelValues(modelName, "503").Inc()
 }
 
 // injectModel adds the model to a JSON request body that omitted it, so the
