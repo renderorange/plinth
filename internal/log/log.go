@@ -26,6 +26,9 @@ func write(level, msg string, kvs ...string) {
 	for i := 0; i+1 < len(kvs); i += 2 {
 		e[kvs[i]] = kvs[i+1]
 	}
+	if len(kvs)%2 == 1 {
+		e["!BADKEY"] = kvs[len(kvs)-1]
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	json.NewEncoder(os.Stdout).Encode(e)
