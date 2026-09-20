@@ -20,37 +20,18 @@ const (
 )
 
 type rawConfig struct {
-	Cluster struct {
-		Name string
-	}
-	Gateway struct {
-		Listen              string
-		MetricsListen       string `toml:"metrics_listen"`
-		HealthInterval      string `toml:"health_interval"`
-		HealthFailThreshold int    `toml:"health_fail_threshold"`
-	}
-	Nodes []struct {
-		IP          string
-		Name        string
-		VLLMPort    int    `toml:"vllm_port"`
-		MetricsPort int    `toml:"metrics_port"`
-		Ring        string `toml:"ring"`
-	}
-	Models struct {
-		Default   string
-		Available []struct {
-			Name           string
-			PipelineStages int    `toml:"pipeline_stages"`
-			Ring           string `toml:"ring"`
-		}
-	}
-	Provision struct {
-		WeightsDir string `toml:"weights_dir"`
-		SSHKeyPath string `toml:"ssh_key"`
-		SSHUser    string `toml:"ssh_user"`
-		SSHPort    int    `toml:"ssh_port"`
-		SSHHostKey string `toml:"ssh_host_key"`
-	}
+	Cluster   ClusterConfig
+	Gateway   rawGatewayConfig
+	Nodes     []NodeConfig
+	Models    ModelsConfig
+	Provision ProvisionConfig
+}
+
+type rawGatewayConfig struct {
+	Listen              string
+	MetricsListen       string `toml:"metrics_listen"`
+	HealthInterval      string `toml:"health_interval"`
+	HealthFailThreshold int    `toml:"health_fail_threshold"`
 }
 
 func Load(path string) (*Config, error) {
@@ -65,15 +46,24 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Cluster: ClusterConfig{Name: raw.Cluster.Name},
+		Cluster: raw.Cluster,
 		Gateway: GatewayConfig{
 			Listen:              raw.Gateway.Listen,
 			MetricsListen:       raw.Gateway.MetricsListen,
 			HealthFailThreshold: raw.Gateway.HealthFailThreshold,
 		},
-		Models: ModelsConfig{
-			Default: raw.Models.Default,
-		},
+		Nodes:     raw.Nodes,
+		Models:    raw.Models,
+		Provision: raw.Provision,
+	}
+
+	for i := range cfg.Nodes {
+		if cfg.Nodes[i].VLLMPort == 0 {
+			cfg.Nodes[i].VLLMPort = defaultVLLMPort
+		}
+		if cfg.Nodes[i].MetricsPort == 0 {
+			cfg.Nodes[i].MetricsPort = defaultMetricsPort
+		}
 	}
 
 	if cfg.Gateway.Listen == "" {
@@ -94,40 +84,6 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("parsing health_interval: %w", err)
 		}
 		cfg.Gateway.HealthInterval = interval
-	}
-
-	for _, n := range raw.Nodes {
-		vllmPort := n.VLLMPort
-		if vllmPort == 0 {
-			vllmPort = defaultVLLMPort
-		}
-		metricsPort := n.MetricsPort
-		if metricsPort == 0 {
-			metricsPort = defaultMetricsPort
-		}
-		cfg.Nodes = append(cfg.Nodes, NodeConfig{
-			IP:          n.IP,
-			Name:        n.Name,
-			VLLMPort:    vllmPort,
-			MetricsPort: metricsPort,
-			Ring:        n.Ring,
-		})
-	}
-
-	for _, m := range raw.Models.Available {
-		cfg.Models.Available = append(cfg.Models.Available, ModelConfig{
-			Name:           m.Name,
-			PipelineStages: m.PipelineStages,
-			Ring:           m.Ring,
-		})
-	}
-
-	cfg.Provision = ProvisionConfig{
-		WeightsDir: raw.Provision.WeightsDir,
-		SSHKeyPath: raw.Provision.SSHKeyPath,
-		SSHUser:    raw.Provision.SSHUser,
-		SSHPort:    raw.Provision.SSHPort,
-		SSHHostKey: raw.Provision.SSHHostKey,
 	}
 
 	if err := cfg.Validate(); err != nil {
