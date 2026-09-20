@@ -3,8 +3,10 @@ package api
 import (
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -325,4 +327,117 @@ func readAll(t *testing.T, r io.Reader) string {
 		t.Fatalf("ReadAll: %v", err)
 	}
 	return string(data)
+}
+
+func sseServer(t *testing.T, body string, status int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(status)
+		io.WriteString(w, body)
+	}))
+	return srv
+}
+
+func TestStreamAttemptPassesThroughToGate(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: one\n\ndata: [DONE]\n\n")
+	}))
+	defer backend.Close()
+	port := extractPort(t, backend.URL)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test/model","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	gate := newCommitGate(rec)
+
+	if err := streamAttempt(req, "127.0.0.1", port, "/v1/chat/completions", gate); err != nil {
+		t.Fatalf("streamAttempt: %v", err)
+	}
+	if gate.err != nil {
+		t.Fatalf("gate.err = %v, want nil", gate.err)
+	}
+	if !gate.committed {
+		t.Fatal("gate not committed for body response")
+	}
+	if gate.status != http.StatusOK {
+		t.Errorf("gate.status = %d, want 200", gate.status)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("recorder code = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "data: [DONE]") {
+		t.Errorf("body = %q, missing DONE", rec.Body.String())
+	}
+	if !rec.Flushed {
+		t.Error("streamed response was never flushed")
+	}
+}
+
+func TestStreamAttemptDialRefused(t *testing.T) {
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	rec.Code = 0 // amendment: NewRecorder() defaults Code to 200; reset so "nothing committed" is observable
+	gate := newCommitGate(rec)
+
+	if err := streamAttempt(req, "127.0.0.1", 1, "/v1/completions", gate); err != nil {
+		t.Fatalf("streamAttempt: %v", err)
+	}
+	if gate.err == nil {
+		t.Fatal("expected transport error for refused dial")
+	}
+	if gate.committed {
+		t.Fatal("gate committed on dial failure")
+	}
+	if rec.Code != 0 {
+		t.Errorf("recorder code = %d, want 0 (nothing written)", rec.Code)
+	}
+}
+
+func TestStreamAttemptCapturesMidStreamErrorCommitted(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: first\n\n")
+			conn.(*net.TCPConn).SetLinger(0)
+			conn.Close()
+		}
+	}()
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	rec.Code = 0 // amendment: NewRecorder() defaults Code to 200; reset so "nothing committed" is observable
+	gate := newCommitGate(rec)
+
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := streamAttempt(req, "127.0.0.1", port, "/v1/completions", gate); err != nil {
+		t.Fatalf("streamAttempt: %v", err)
+	}
+	if gate.err == nil {
+		t.Fatal("expected mid-stream error capture")
+	}
+	if rec.Code != 0 && rec.Code != 200 {
+		t.Errorf("recorder code = %d, want 0 or 200", rec.Code)
+	}
+	if rec.Code == 0 && gate.committed {
+		t.Fatal("gate committed despite nothing reaching the recorder")
+	}
+}
+
+func TestStreamAttemptInvalidTargetHost(t *testing.T) {
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	gate := newCommitGate(rec)
+	if err := streamAttempt(req, "bad host", 80, "/v1/completions", gate); err == nil {
+		t.Fatal("expected parse error for malformed host")
+	}
 }

@@ -135,3 +135,29 @@ func (b *streamBody) Read(p []byte) (int, error) {
 	}
 	return 0, io.EOF
 }
+
+// Amendment A: http.Response.Body is an io.ReadCloser; ReverseProxy defers
+// res.Body.Close() on the replacement body, so streamBody must implement
+// Close. Stops the deadline timer and closes the wrapped body.
+func (b *streamBody) Close() error {
+	b.timer.Stop()
+	return b.rc.Close()
+}
+
+func streamAttempt(r *http.Request, host string, port int, path string, gate *commitGate) error {
+	proxy, err := newProxy(host, port, path, r)
+	if err != nil {
+		return err
+	}
+	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+		gate.err = err
+	}
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		resp.Body = newStreamBody(resp.Body, func(err error) {
+			gate.err = err
+		})
+		return nil
+	}
+	proxy.ServeHTTP(gate, r)
+	return nil
+}
