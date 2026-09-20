@@ -811,3 +811,33 @@ func TestStopDrainsInFlightRound(t *testing.T) {
 		t.Errorf("ConsecutiveFailures = %d, want 1 (drained round must write its result)", got)
 	}
 }
+
+func TestStopDoesNotStartNewRound(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: 20 * time.Millisecond, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "n", VLLMPort: extractPort(srv.URL), MetricsPort: 1},
+		},
+	}
+
+	for i := 0; i < 12; i++ {
+		mon := NewMonitor(cfg)
+		before := hits.Load()
+		mon.Start()
+		waitForCondition(t, time.Second, "round in flight", func() bool {
+			return hits.Load() == before+1
+		})
+		mon.Stop()
+		if got := hits.Load(); got != before+1 {
+			t.Errorf("iteration %d: health endpoint hits = %d, want %d (no new round after Stop)", i, got, before+1)
+		}
+	}
+}

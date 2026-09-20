@@ -97,6 +97,11 @@ func (m *Monitor) loop() {
 	for {
 		select {
 		case <-ticker.C:
+			select {
+			case <-m.stop:
+				return
+			default:
+			}
 			m.checkAll()
 		case <-m.stop:
 			return
