@@ -124,6 +124,15 @@ Client → Gateway → Balancer.Select() → Health Monitor
 5. Response is buffered and returned to client (no streaming)
 6. Request duration and status are recorded in metrics
 
+## Retry and Failover
+
+Each proxy attempt is buffered in memory and committed to the client exactly once, only when an attempt succeeds. Connection-level failures are classified in two tiers and retried on the next node in the pool:
+
+- **Tier 1** — Dial failures (connection refused, no route to host). The request provably never reached vLLM, so retrying is safe.
+- **Tier 2** — Timeouts before a response arrives, including the response-header timeout. Retrying carries a small duplicate-generation risk, since the first node may already have started generating.
+
+Nodes with failed attempts are skipped for 10 seconds (offline skip-set), and each failure triggers `Monitor.Recheck` so the node's health is re-checked immediately.
+
 ## Health States
 
 | State | Description |

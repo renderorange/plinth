@@ -79,7 +79,8 @@ The `model` field picks the routing pool: ring models round-robin among their ri
 | Status | Description |
 |--------|-------------|
 | 400 | Invalid request body, or `model` omitted with no default configured |
-| 503 | No healthy node available |
+| 502 | Connection to the node lost after the response started (response truncated) |
+| 503 | `no healthy node available` (pool empty) or `no reachable node available` (all proxy attempts failed) |
 
 ### Text Completions
 
@@ -107,7 +108,8 @@ The `model` field is optional. If omitted, the configured default model is used 
 | Status | Description |
 |--------|-------------|
 | 400 | Invalid request body, or `model` omitted with no default configured |
-| 503 | No healthy node available |
+| 502 | Connection to the node lost after the response started (response truncated) |
+| 503 | `no healthy node available` (pool empty) or `no reachable node available` (all proxy attempts failed) |
 
 ## Metrics API (default port 9090)
 
@@ -200,4 +202,5 @@ Common HTTP status codes:
 | 400 | Bad request (invalid body) |
 | 413 | Request body too large |
 | 500 | Internal server error |
-| 503 | No healthy node available |
+| 502 | Connection to the node lost after the response started |
+| 503 | No healthy node available (pool empty) or no reachable node available (all proxy attempts failed) |
