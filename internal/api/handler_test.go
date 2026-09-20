@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1056,5 +1058,225 @@ func TestProxyToVLLMStreamingJSONErrorPassthrough(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "bad model") {
 		t.Errorf("body = %q, missing error payload", w.Body.String())
+	}
+}
+
+func TestProxyToVLLMStreamingRetriesAfterHeadersOnlyReset(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			tcp, _ := conn.(*net.TCPConn)
+			io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+			tcp.SetLinger(0)
+			tcp.Close()
+		}
+	}()
+	badPort := ln.Addr().(*net.TCPAddr).Port
+
+	var goodHits atomic.Int64
+	good := newServerOn(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			goodHits.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "data: ok\n\n")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+	goodPort := extractPort(t, good.URL)
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "resetting", VLLMPort: badPort, MetricsPort: badPort},
+		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+	})
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (headers-then-RST must retry before first chunk)", w.Code)
+	}
+	if goodHits.Load() != 1 {
+		t.Fatalf("good node hits = %d, want 1", goodHits.Load())
+	}
+}
+
+func TestProxyToVLLMStreamingFirstByteDeadlineRetries(t *testing.T) {
+	old := streamFirstByteTimeout
+	streamFirstByteTimeout = 100 * time.Millisecond
+	defer func() { streamFirstByteTimeout = old }()
+
+	// Backend that responds with headers and then stalls forever.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+			time.Sleep(2 * time.Second)
+			conn.Close()
+		}
+	}()
+	stallPort := ln.Addr().(*net.TCPAddr).Port
+
+	var goodHits atomic.Int64
+	good := newServerOn(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			goodHits.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "data: ok\n\n")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+	goodPort := extractPort(t, good.URL)
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "stalling", VLLMPort: stallPort, MetricsPort: stallPort},
+		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+	})
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	start := time.Now()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (first-byte deadline must retry on the good node)", w.Code)
+	}
+	if goodHits.Load() != 1 {
+		t.Fatalf("good node hits = %d, want 1", goodHits.Load())
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("request took %v; deadline retry did not trigger at ~100ms", time.Since(start))
+	}
+}
+
+func TestProxyToVLLMStreamingTruncatedAfterCommitNo502(t *testing.T) {
+	// Amendment B + E: one COMPLETE chunk then graceful FIN (no terminal 0-chunk).
+	// Amendment E: drain the POST request first — Close with unread request bytes
+	// sends RST instead of FIN and races away the chunk (measured 25-40% flake
+	// before drain on both toolchains). Data is delivered deterministically
+	// (commits the gate), then the client hits io.ErrUnexpectedEOF on the
+	// missing terminal chunk.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			br := bufio.NewReader(conn)
+			if reqR, rerr := http.ReadRequest(br); rerr == nil {
+				io.Copy(io.Discard, reqR.Body)
+				reqR.Body.Close()
+			}
+			io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\ndata: first\n\n\r\n")
+			conn.Close()
+		}
+	}()
+	badPort := ln.Addr().(*net.TCPAddr).Port
+
+	var goodHits atomic.Int64
+	good := newServerOn(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			goodHits.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "data: never\n\n")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+	goodPort := extractPort(t, good.URL)
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "truncating", VLLMPort: badPort, MetricsPort: badPort},
+		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+	})
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (truncated committed stream must not become 502)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "data: first") {
+		t.Errorf("body = %q, missing committed first chunk", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "data: [DONE]") {
+		t.Error("truncated stream must not gain a fabricated [DONE]")
+	}
+	if goodHits.Load() != 0 {
+		t.Fatal("good node was retried after first chunk committed — forbidden")
+	}
+}
+
+func TestProxyToVLLMStreamingClientAbortPreCommit(t *testing.T) {
+	// Backend accepts then stalls before responding.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			time.Sleep(2 * time.Second)
+			conn.Close()
+		}
+	}()
+	stallPort := ln.Addr().(*net.TCPAddr).Port
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "stalling", VLLMPort: stallPort, MetricsPort: stallPort},
+	})
+
+	rec := httptest.NewRecorder()
+	rec.Code = 0
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 0 {
+		t.Errorf("code = %d, want 0 (client abort before commit must be silent)", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body %q written despite client abort", rec.Body.String())
 	}
 }
