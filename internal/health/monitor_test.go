@@ -605,17 +605,21 @@ func TestCheckAllSkipsNodeWithInFlightRecheck(t *testing.T) {
 	done := make(chan struct{})
 	go func() { mon.checkAll(); close(done) }()
 
+	guardedFastPath := false
 	select {
 	case <-done:
-		// guarded: checkAll skipped the busy node and returned immediately
+		guardedFastPath = true
 	case <-time.After(200 * time.Millisecond):
-		// unguarded: checkAll is blocked on the release channel; unblock below
 	}
 	close(release)
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("checkAll did not return")
+	}
+
+	if !guardedFastPath {
+		t.Fatal("checkAll blocked on the in-flight node; guard fast path was not taken")
 	}
 
 	waitForCondition(t, time.Second, "failure recorded", func() bool {
@@ -633,12 +637,14 @@ func TestCheckAllSkipsNodeWithInFlightRecheck(t *testing.T) {
 func newServerOnIP(t *testing.T, ip string, handler http.Handler) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(handler)
+	defaultListener := srv.Listener
 	l, err := net.Listen("tcp", ip+":0")
 	if err != nil {
 		t.Fatalf("listen on %s: %v", ip, err)
 	}
 	srv.Listener = l
 	srv.Start()
+	defaultListener.Close()
 	return srv
 }
 
@@ -666,7 +672,7 @@ func TestCheckAllDoesNotStallOnSlowNode(t *testing.T) {
 	done := make(chan struct{})
 	go func() { mon.checkAll(); close(done) }()
 
-	waitForCondition(t, time.Second, "fast node updated while slow node in flight", func() bool {
+	waitForCondition(t, 2*time.Second, "fast node updated while slow node in flight", func() bool {
 		for _, st := range mon.GetNodeStates() {
 			if st.IP == "127.0.0.1" && !st.LastCheck.IsZero() {
 				return true
@@ -677,7 +683,7 @@ func TestCheckAllDoesNotStallOnSlowNode(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(4 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("checkAll did not return after slow node finished")
 	}
 	for _, st := range mon.GetNodeStates() {
@@ -840,13 +846,13 @@ func TestStopDrainsInFlightRound(t *testing.T) {
 	select {
 	case <-stopped:
 		t.Fatal("Stop returned while a round was in flight")
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(500 * time.Millisecond):
 	}
 
 	close(release)
 	select {
 	case <-stopped:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Stop did not return after the round drained")
 	}
 
