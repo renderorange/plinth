@@ -395,13 +395,13 @@ func TestStreamAttemptDialRefused(t *testing.T) {
 	}
 }
 
-// Amendment B (post-run): the original plan backend wrote a data chunk then
-// reset, but that races ACK-vs-RST on loopback: on the CI-pinned go1.22.12
-// the reset sometimes surfaces as clean EOF after data delivery, so gate.err
-// was nil in a subset of count=10 runs. A headers-only-then-RST backend has
-// no data to race: the body read must fail before any byte is delivered,
-// making "reset before commit leaves the gate clean" deterministic. Renamed
-// accordingly (the committed-truncated case is T6's handler-level concern).
+// Amendment B (post-run, revised): resets on close-delimited bodies race the
+// transport's EOF mapping — on go1.22.12 the RST sometimes surfaces as clean
+// io.EOF before any byte, leaving gate.err nil (2/30 with -race). Chunked
+// framing with ZERO body bytes makes a reset an unconditional read error on
+// every Go version: no terminal 0-chunk ever arrives, so clean EOF is
+// impossible, and no data bytes exist to be delivered, so the gate cannot
+// commit. Verified deterministic: count=30 clean on go1.22.12 and default.
 func TestStreamAttemptCapturesResetBeforeCommit(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -414,7 +414,7 @@ func TestStreamAttemptCapturesResetBeforeCommit(t *testing.T) {
 			if err != nil {
 				return
 			}
-			io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+			io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
 			conn.(*net.TCPConn).SetLinger(0)
 			conn.Close()
 		}
