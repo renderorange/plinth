@@ -1,9 +1,13 @@
 package api
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestCommitGateCommitOnFirstWrite(t *testing.T) {
@@ -98,4 +102,218 @@ func TestCommitGateFlushAfterCommitDelegates(t *testing.T) {
 	if !rec.Flushed {
 		t.Error("post-commit Flush must flush the client writer")
 	}
+}
+
+type errAfterReader struct {
+	data string
+	err  error
+	done bool
+}
+
+func (r *errAfterReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, r.err
+	}
+	r.done = true
+	return copy(p, r.data), nil
+}
+
+func (r *errAfterReader) Close() error { return nil }
+
+func TestStreamBodyCapturesErrorAndReturnsEOF(t *testing.T) {
+	boom := errors.New("connection reset")
+	var captured error
+	b := newStreamBody(&errAfterReader{data: "abc", err: boom}, func(err error) {
+		captured = err
+	})
+
+	var out []byte
+	buf := make([]byte, 8)
+	for {
+		n, err := b.Read(buf)
+		out = append(out, buf[:n]...)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Read error: %v", err)
+		}
+	}
+
+	if string(out) != "abc" {
+		t.Errorf("data = %q, want %q", out, "abc")
+	}
+	if captured != boom {
+		t.Errorf("captured = %v, want %v", captured, boom)
+	}
+}
+
+type eofReader struct{}
+
+func (eofReader) Read(p []byte) (int, error) { return 0, io.EOF }
+func (eofReader) Close() error               { return nil }
+
+func TestStreamBodyDoesNotCaptureEOF(t *testing.T) {
+	captured := false
+	b := newStreamBody(eofReader{}, func(error) { captured = true })
+	buf := make([]byte, 8)
+	_, err := b.Read(buf)
+	if err != io.EOF {
+		t.Fatalf("err = %v, want EOF", err)
+	}
+	if captured {
+		t.Error("clean EOF must not be captured as an error")
+	}
+}
+
+type blockingReadCloser struct {
+	mu     sync.Mutex
+	closed bool
+	closeC chan struct{}
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{closeC: make(chan struct{})}
+}
+
+func (r *blockingReadCloser) Read(p []byte) (int, error) {
+	<-r.closeC
+	return 0, io.EOF
+}
+
+func (r *blockingReadCloser) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.closed {
+		r.closed = true
+		close(r.closeC)
+	}
+	return nil
+}
+
+func TestStreamBodyDeadlineAbortsBlockedRead(t *testing.T) {
+	old := streamFirstByteTimeout
+	streamFirstByteTimeout = 20 * time.Millisecond
+	defer func() { streamFirstByteTimeout = old }()
+
+	fake := newBlockingReadCloser()
+	var mu sync.Mutex
+	var captured error
+	b := newStreamBody(fake, func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if captured == nil {
+			captured = err
+		}
+	})
+
+	readErrC := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 8)
+		_, err := b.Read(buf)
+		readErrC <- err
+	}()
+
+	select {
+	case err := <-readErrC:
+		if err != io.EOF {
+			t.Fatalf("Read err = %v, want io.EOF after deadline", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending Read was not aborted by the deadline")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if captured == nil {
+		t.Fatal("no error captured on deadline")
+	}
+	if classifyProxyError(captured) != outcomeRetry {
+		t.Errorf("classify = %v, want outcomeRetry (deadline must be retryable)", classifyProxyError(captured))
+	}
+}
+
+func TestStreamBodyFirstByteDisarmsDeadline(t *testing.T) {
+	old := streamFirstByteTimeout
+	streamFirstByteTimeout = 20 * time.Millisecond
+	defer func() { streamFirstByteTimeout = old }()
+
+	fake := newDataThenBlockReadCloser()
+	var captured error
+	b := newStreamBody(fake, func(err error) { captured = err })
+
+	buf := make([]byte, 8)
+	if _, err := b.Read(buf); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	time.Sleep(3 * streamFirstByteTimeout)
+	if captured != nil {
+		t.Errorf("deadline fired after bytes arrived: %v", captured)
+	}
+}
+
+// Amendment: the plan reused blockingReadCloser here, but that fake can never
+// return data, so the first Read can only end in deadline EOF — structurally
+// impossible to pass. A data-then-block fake restores the test's intent:
+// first byte disarms the timer; waiting far past the deadline captures nothing.
+type dataThenBlockReadCloser struct {
+	mu     sync.Mutex
+	gave   bool
+	closed bool
+	closeC chan struct{}
+}
+
+func newDataThenBlockReadCloser() *dataThenBlockReadCloser {
+	return &dataThenBlockReadCloser{closeC: make(chan struct{})}
+}
+
+func (r *dataThenBlockReadCloser) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	if !r.gave {
+		r.gave = true
+		r.mu.Unlock()
+		p[0] = 'x'
+		return 1, nil
+	}
+	r.mu.Unlock()
+	<-r.closeC
+	return 0, io.EOF
+}
+
+func (r *dataThenBlockReadCloser) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.closed {
+		r.closed = true
+		close(r.closeC)
+	}
+	return nil
+}
+
+func TestStreamBodyWorksWithHTTPBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "chunk\n")
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captured error
+	b := newStreamBody(resp.Body, func(err error) { captured = err })
+	readAll(t, b)
+	if captured != nil {
+		t.Errorf("unexpected capture: %v", captured)
+	}
+}
+
+func readAll(t *testing.T, r io.Reader) string {
+	t.Helper()
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	return string(data)
 }
