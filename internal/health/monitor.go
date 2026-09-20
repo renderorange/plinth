@@ -64,6 +64,26 @@ func (m *Monitor) GetNodeStates() []NodeState {
 	return states
 }
 
+// Recheck runs an immediate health check for one node. It is used when the
+// gateway observes a proxy-level connection failure so that node state
+// converges immediately instead of on the polling cadence. Safe to call
+// without Start(); no-op for unknown IPs.
+func (m *Monitor) Recheck(ip string) {
+	var nc config.NodeConfig
+	found := false
+	for _, n := range m.cfg.Nodes {
+		if n.IP == ip {
+			nc = n
+			found = true
+			break
+		}
+	}
+	if !found {
+		return
+	}
+	go m.checkNode(nc)
+}
+
 func (m *Monitor) loop() {
 	defer close(m.done)
 	ticker := time.NewTicker(m.cfg.Gateway.HealthInterval)

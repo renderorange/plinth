@@ -509,6 +509,57 @@ func TestExtractGPUUUID(t *testing.T) {
 	}
 }
 
+func TestMonitorRecheckUpdatesState(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			// closed port → health check fails
+			{IP: "127.0.0.1", Name: "node-1", VLLMPort: 1, MetricsPort: 1},
+		},
+		Models: config.ModelsConfig{
+			Available: []config.ModelConfig{{Name: "test/model", PipelineStages: 1}},
+		},
+	}
+	mon := NewMonitor(cfg)
+	states := mon.GetNodeStates()
+	if len(states) != 1 || states[0].Status != Healthy {
+		t.Fatalf("initial state = %+v, want single healthy node", states)
+	}
+
+	mon.Recheck("127.0.0.1")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		states = mon.GetNodeStates()
+		if states[0].ConsecutiveFailures >= 1 || states[0].Status == Degraded {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("Recheck did not update node state: %+v", states)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestMonitorRecheckUnknownIPNoPanic(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1", VLLMPort: 8000, MetricsPort: 9100},
+		},
+		Models: config.ModelsConfig{
+			Available: []config.ModelConfig{{Name: "test/model", PipelineStages: 1}},
+		},
+	}
+	mon := NewMonitor(cfg)
+	mon.Recheck("10.0.0.99") // must not panic, must not create state
+	if len(mon.GetNodeStates()) != 1 {
+		t.Error("Recheck(unknown) mutated node set")
+	}
+}
+
 func extractPort(url string) int {
 	// Extract port from httptest.Server URL like "http://127.0.0.1:PORT"
 	for i := len(url) - 1; i >= 0; i-- {
