@@ -84,3 +84,10 @@ func TestRequestsTotalCanBeIncremented(t *testing.T) {
 		t.Errorf("RequestsTotal value = %f, want >= 1", m.GetCounter().GetValue())
 	}
 }
+
+func TestProxyAttemptsTotalMetricRegistered(t *testing.T) {
+	v := ProxyAttemptsTotal.WithLabelValues("model1", "502")
+	if err := v.Write(&dto.Metric{}); err != nil {
+		t.Fatalf("ProxyAttemptsTotal not registered or not writable: %v", err)
+	}
+}
