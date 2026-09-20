@@ -726,3 +726,88 @@ func TestRecheckNoOpWhenCheckInFlight(t *testing.T) {
 		t.Errorf("health endpoint hits = %d, want 1", got)
 	}
 }
+
+type panicOnceTransport struct {
+	inner    http.RoundTripper
+	panicked *atomic.Bool
+}
+
+func (p *panicOnceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if p.panicked.CompareAndSwap(false, true) {
+		panic("injected probe panic")
+	}
+	return p.inner.RoundTrip(req)
+}
+
+func TestCheckGuardClearedOnPanic(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "n", VLLMPort: extractPort(srv.URL), MetricsPort: 1},
+		},
+	}
+	mon := NewMonitor(cfg)
+	var panicked atomic.Bool
+	mon.client.Transport = &panicOnceTransport{inner: http.DefaultTransport, panicked: &panicked}
+
+	mon.checkAll() // first round: probe panics inside; runCheck must recover
+	mon.checkAll() // second round: guard flag was cleared, probe runs again
+
+	waitForCondition(t, time.Second, "node checked after panic", func() bool {
+		return !mon.GetNodeStates()[0].LastCheck.IsZero()
+	})
+	if !panicked.Load() {
+		t.Error("panic transport was never exercised")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("health endpoint hits = %d, want 1 (wedged guard would skip the second round)", got)
+	}
+}
+
+func TestStopDrainsInFlightRound(t *testing.T) {
+	release := make(chan struct{})
+	var hits atomic.Int32
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-release
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer blocked.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "n", VLLMPort: extractPort(blocked.URL), MetricsPort: 1},
+		},
+	}
+	mon := NewMonitor(cfg)
+	mon.Start()
+	waitForCondition(t, time.Second, "probe in flight", func() bool { return hits.Load() == 1 })
+
+	stopped := make(chan struct{})
+	go func() { mon.Stop(); close(stopped) }()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while a round was in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return after the round drained")
+	}
+
+	if got := mon.GetNodeStates()[0].ConsecutiveFailures; got != 1 {
+		t.Errorf("ConsecutiveFailures = %d, want 1 (drained round must write its result)", got)
+	}
+}

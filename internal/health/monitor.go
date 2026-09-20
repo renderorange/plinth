@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"plinth/internal/config"
+	"plinth/internal/log"
 )
 
 type Monitor struct {
@@ -83,7 +84,7 @@ func (m *Monitor) Recheck(ip string) {
 	if !found {
 		return
 	}
-	go m.checkNode(nc)
+	go m.runCheck(nc)
 }
 
 func (m *Monitor) loop() {
@@ -103,13 +104,22 @@ func (m *Monitor) loop() {
 	}
 }
 
+func (m *Monitor) runCheck(nc config.NodeConfig) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("health check panicked", "node", nc.IP, "panic", fmt.Sprint(r))
+		}
+	}()
+	m.checkNode(nc)
+}
+
 func (m *Monitor) checkAll() {
 	var wg sync.WaitGroup
 	for _, nc := range m.cfg.Nodes {
 		wg.Add(1)
 		go func(nc config.NodeConfig) {
 			defer wg.Done()
-			m.checkNode(nc)
+			m.runCheck(nc)
 		}(nc)
 	}
 	wg.Wait()
