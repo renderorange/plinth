@@ -94,8 +94,11 @@ func TestInfoWithOddKeyValues(t *testing.T) {
 	if m["key1"] != "val1" {
 		t.Errorf("key1 = %q, want %q", m["key1"], "val1")
 	}
+	if m["!BADKEY"] != "key2" {
+		t.Errorf("!BADKEY = %q, want %q", m["!BADKEY"], "key2")
+	}
 	if _, ok := m["key2"]; ok {
-		t.Error("key2 should not be present (odd arg)")
+		t.Error("key2 should not be present as its own key (odd arg)")
 	}
 }
 
