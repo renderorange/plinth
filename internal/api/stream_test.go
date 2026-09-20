@@ -250,6 +250,15 @@ func TestStreamBodyFirstByteDisarmsDeadline(t *testing.T) {
 	if captured != nil {
 		t.Errorf("deadline fired after bytes arrived: %v", captured)
 	}
+	// Amendment (post-review): the timer must also be observed to be disarmed —
+	// if onDeadline had fired it would have Close()d the fake. Without this
+	// check the test passes even with the disarm logic deleted.
+	fake.mu.Lock()
+	closed := fake.closed
+	fake.mu.Unlock()
+	if closed {
+		t.Fatal("deadline fired and closed the reader despite the first byte arriving")
+	}
 }
 
 // Amendment: the plan reused blockingReadCloser here, but that fake can never
