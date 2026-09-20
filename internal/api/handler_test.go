@@ -928,3 +928,133 @@ func TestProxyToVLLMTruncatedResponseIs502NoRetry(t *testing.T) {
 		t.Fatal("good node was retried after truncated response — forbidden")
 	}
 }
+
+func TestProxyToVLLMStreamingHappyPath(t *testing.T) {
+	var receivedBody atomic.Value
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		receivedBody.Store(string(body))
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer backend.Close()
+
+	h, mon := newTestHandlerWithBackend(backend.URL)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	payload := `{"model":"test/model","prompt":"hello","stream":true}`
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "data: [DONE]") {
+		t.Errorf("body = %q, missing DONE", w.Body.String())
+	}
+	if !w.Flushed {
+		t.Error("streamed response was never flushed to the client")
+	}
+	if b, ok := receivedBody.Load().(string); !ok || b != payload {
+		t.Errorf("backend body = %q, want stream:true passthrough %q", receivedBody.Load(), payload)
+	}
+}
+
+func TestProxyToVLLMStreamingRetriesOnDialFailure(t *testing.T) {
+	var goodHits atomic.Int64
+	good := newServerOn(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			goodHits.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "data: ok\n\ndata: [DONE]\n\n")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+	goodPort := extractPort(t, good.URL)
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "dead", VLLMPort: 1, MetricsPort: 1},
+		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+	})
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (retried on good node)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "data: [DONE]") {
+		t.Errorf("body = %q, missing DONE", w.Body.String())
+	}
+	if goodHits.Load() != 1 {
+		t.Fatalf("good node hits = %d, want 1", goodHits.Load())
+	}
+}
+
+func TestProxyToVLLMStreamingEmptyStreamCommits(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	h, mon := newTestHandlerWithBackend(backend.URL)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("status = %d, want 201 (empty stream commits recorded status)", w.Code)
+	}
+}
+
+func TestProxyToVLLMStreamingJSONErrorPassthrough(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":"bad model"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	h, mon := newTestHandlerWithBackend(backend.URL)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (JSON error passthrough for stream request)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "bad model") {
+		t.Errorf("body = %q, missing error payload", w.Body.String())
+	}
+}
