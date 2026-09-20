@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -340,6 +341,24 @@ func TestNodesInRing(t *testing.T) {
 	nodes = cfg.NodesInRing("nonexistent")
 	if len(nodes) != 0 {
 		t.Errorf("NodesInRing(nonexistent) = %d, want 0", len(nodes))
+	}
+}
+
+func TestValidateDuplicateNodeIPs(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes: []NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1", VLLMPort: 8000, MetricsPort: 9100},
+			{IP: "10.0.0.1", Name: "node-2", VLLMPort: 8001, MetricsPort: 9101},
+		},
+		Models: ModelsConfig{
+			Available: []ModelConfig{{Name: "test/model", PipelineStages: 1}},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for duplicate node IPs, got nil")
+	} else if !strings.Contains(err.Error(), "duplicate node IP") {
+		t.Errorf("error = %q, want message containing %q", err.Error(), "duplicate node IP")
 	}
 }
 

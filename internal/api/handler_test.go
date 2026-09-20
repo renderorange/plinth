@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,9 +14,12 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	"plinth/internal/balancer"
 	"plinth/internal/config"
 	"plinth/internal/health"
+	"plinth/internal/metrics"
 )
 
 func newTestHandler() *Handler {
@@ -187,53 +191,6 @@ func TestModelsEndpointStructure(t *testing.T) {
 	}
 }
 
-func TestStatusRecorderCapturesCode(t *testing.T) {
-	tests := []struct {
-		name       string
-		writeCode  int
-		wantStatus int
-	}{
-		{"ok", 200, 200},
-		{"internal error", 500, 500},
-		{"bad gateway", 502, 502},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			sr := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-			sr.WriteHeader(tt.writeCode)
-			if sr.status != tt.wantStatus {
-				t.Errorf("statusRecorder.status = %d, want %d", sr.status, tt.wantStatus)
-			}
-		})
-	}
-}
-
-func TestStatusRecorderFlushNoPanic(t *testing.T) {
-	w := httptest.NewRecorder()
-	sr := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	sr.Flush()
-}
-
-type flushRecorder struct {
-	*httptest.ResponseRecorder
-	flushed bool
-}
-
-func (f *flushRecorder) Flush() {
-	f.flushed = true
-	f.ResponseRecorder.Flush()
-}
-
-func TestStatusRecorderFlushDelegates(t *testing.T) {
-	fr := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
-	sr := &statusRecorder{ResponseWriter: fr, status: http.StatusOK}
-	sr.Flush()
-	if !fr.flushed {
-		t.Error("Flush was not delegated to underlying ResponseWriter")
-	}
-}
-
 func newTestHandlerWithBackend(backendURL string) (*Handler, *health.Monitor) {
 	u, _ := url.Parse(backendURL)
 	port, _ := strconv.Atoi(u.Port())
@@ -397,6 +354,9 @@ func TestProxyToVLLMRecordsMetrics(t *testing.T) {
 
 	waitForHealthy(t, mon)
 
+	attemptsBefore := &dto.Metric{}
+	metrics.ProxyAttemptsTotal.WithLabelValues("test/model", "200").Write(attemptsBefore)
+
 	payload := `{"model":"test/model","prompt":"hi"}`
 	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
@@ -405,6 +365,13 @@ func TestProxyToVLLMRecordsMetrics(t *testing.T) {
 
 	if w.Code != 200 {
 		t.Errorf("status = %d, want 200", w.Code)
+	}
+
+	attemptsAfter := &dto.Metric{}
+	metrics.ProxyAttemptsTotal.WithLabelValues("test/model", "200").Write(attemptsAfter)
+	got := attemptsAfter.GetCounter().GetValue() - attemptsBefore.GetCounter().GetValue()
+	if got != 1 {
+		t.Errorf("ProxyAttemptsTotal delta = %f, want 1 (happy path should record exactly one attempt)", got)
 	}
 }
 
@@ -665,5 +632,299 @@ func TestProxyToVLLMMissingModelNoDefaultReturns400(t *testing.T) {
 
 	if w.Code != 400 {
 		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestOfflineSet(t *testing.T) {
+	o := newOfflineSet()
+	if o.skip("10.0.0.1") {
+		t.Error("fresh set should not skip")
+	}
+	if !o.mark("10.0.0.1") {
+		t.Error("first mark should be a transition")
+	}
+	if o.mark("10.0.0.1") {
+		t.Error("second mark within TTL should not be a transition")
+	}
+	if !o.skip("10.0.0.1") {
+		t.Error("marked IP should be skipped")
+	}
+	o.clear("10.0.0.1")
+	if o.skip("10.0.0.1") {
+		t.Error("cleared IP should not be skipped")
+	}
+	// expiry: backdate the entry
+	o.mark("10.0.0.2")
+	o.mu.Lock()
+	o.until["10.0.0.2"] = time.Now().Add(-time.Minute)
+	o.mu.Unlock()
+	if o.skip("10.0.0.2") {
+		t.Error("expired entry should not be skipped")
+	}
+	o.mu.Lock()
+	_, stillThere := o.until["10.0.0.2"]
+	o.mu.Unlock()
+	if stillThere {
+		t.Error("expired entry should be pruned")
+	}
+}
+
+func newServerOn(t *testing.T, ip string, h http.Handler) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(h)
+	ln, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
+	if err != nil {
+		t.Fatalf("listen on %s: %v", ip, err)
+	}
+	srv.Listener.Close()
+	srv.Listener = ln
+	srv.Start()
+	return srv
+}
+
+func handlerWithNodes(t *testing.T, nodes []config.NodeConfig) *Handler {
+	t.Helper()
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Gateway: config.GatewayConfig{
+			HealthInterval:      100 * time.Millisecond,
+			HealthFailThreshold: 3,
+		},
+		Nodes: nodes,
+		Models: config.ModelsConfig{
+			Default: "test/model",
+			Available: []config.ModelConfig{
+				{Name: "test/model", PipelineStages: 1},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg) // NOT started — see constraints
+	return NewHandler(cfg, mon, balancer.New())
+}
+
+func TestProxyToVLLMRetriesOnConnectionFailure(t *testing.T) {
+	var hits atomic.Int64
+	good := newServerOn(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			hits.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"choices":[{"text":"retried"}]}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+	u, _ := url.Parse(good.URL)
+	goodPort, _ := strconv.Atoi(u.Port())
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "dead", VLLMPort: 1, MetricsPort: 1},
+		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+	})
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (retried on good node)", w.Code)
+	}
+	if hits.Load() == 0 {
+		t.Fatal("good node never received the request")
+	}
+}
+
+func TestProxyToVLLMAllNodesDeadReturns503(t *testing.T) {
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "dead-1", VLLMPort: 1, MetricsPort: 1},
+		{IP: "127.0.0.2", Name: "dead-2", VLLMPort: 2, MetricsPort: 2},
+	})
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 503 {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestProxyToVLLMNoRetryOnHTTPError(t *testing.T) {
+	var goodHits atomic.Int64
+	bad := newServerOn(t, "127.0.0.1", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":"internal"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer bad.Close()
+	good := newServerOn(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			goodHits.Add(1)
+			fmt.Fprint(w, `{"choices":[]}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+	u, _ := url.Parse(good.URL)
+	goodPort, _ := strconv.Atoi(u.Port())
+	ub, _ := url.Parse(bad.URL)
+	badPort, _ := strconv.Atoi(ub.Port())
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "bad", VLLMPort: badPort, MetricsPort: badPort},
+		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+	})
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (vLLM error must not trigger retry)", w.Code)
+	}
+	if goodHits.Load() != 0 {
+		t.Fatal("good node was retried after HTTP 500 — forbidden")
+	}
+}
+
+func TestProxyToVLLMOfflineNodeSkippedNextRequest(t *testing.T) {
+	var goodHits atomic.Int64
+	good := newServerOn(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			goodHits.Add(1)
+			fmt.Fprint(w, `{"choices":[]}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+	u, _ := url.Parse(good.URL)
+	goodPort, _ := strconv.Atoi(u.Port())
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "dead", VLLMPort: 1, MetricsPort: 1},
+		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+	})
+
+	send := func() int {
+		req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	if got := send(); got != 200 {
+		t.Fatalf("first request status = %d, want 200", got)
+	}
+	if got := send(); got != 200 {
+		t.Fatalf("second request status = %d, want 200", got)
+	}
+	if goodHits.Load() != 2 {
+		t.Fatalf("good node hits = %d, want 2 (offline dead node must be skipped on second request)", goodHits.Load())
+	}
+}
+
+func TestProxyToVLLMFailsOverToDegradedNode(t *testing.T) {
+	var goodHits atomic.Int64
+	good := newServerOn(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		goodHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[]}`)
+	}))
+	defer good.Close()
+	u, _ := url.Parse(good.URL)
+	goodPort, _ := strconv.Atoi(u.Port())
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "dead", VLLMPort: 1, MetricsPort: 1},
+		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+	})
+
+	h.mon.Recheck("127.0.0.2")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		degraded := false
+		for _, s := range h.mon.GetNodeStates() {
+			if s.IP == "127.0.0.2" && s.Status == health.Degraded {
+				degraded = true
+			}
+		}
+		if degraded {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for good node to become Degraded")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (degraded survivor must be reachable)", w.Code)
+	}
+	if goodHits.Load() != 1 {
+		t.Fatalf("good node POST hits = %d, want 1", goodHits.Load())
+	}
+}
+
+func TestProxyToVLLMTruncatedResponseIs502NoRetry(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+			conn.Close()
+		}
+	}()
+	badPort := ln.Addr().(*net.TCPAddr).Port
+
+	var goodHits atomic.Int64
+	good := newServerOn(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		goodHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+	u, _ := url.Parse(good.URL)
+	goodPort, _ := strconv.Atoi(u.Port())
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "truncating", VLLMPort: badPort, MetricsPort: badPort},
+		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+	})
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (truncated response must not be retried)", w.Code)
+	}
+	if goodHits.Load() != 0 {
+		t.Fatal("good node was retried after truncated response — forbidden")
 	}
 }

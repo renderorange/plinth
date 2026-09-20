@@ -26,6 +26,10 @@ var (
 		Name: "gateway_requests_total",
 		Help: "Total requests by model and status",
 	}, []string{"model", "status"})
+	ProxyAttemptsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_proxy_attempts_total",
+		Help: "Proxy attempts by model and observed status",
+	}, []string{"model", "status"})
 )
 
 func init() {
@@ -34,4 +38,5 @@ func init() {
 	prometheus.MustRegister(NodesDead)
 	prometheus.MustRegister(RequestDuration)
 	prometheus.MustRegister(RequestsTotal)
+	prometheus.MustRegister(ProxyAttemptsTotal)
 }

@@ -130,6 +130,8 @@ See [config/gateway.toml.example](config/gateway.toml.example) for a complete ex
 | `[provision]` | `ssh_port` | SSH port | `22` |
 | `[provision]` | `ssh_host_key` | Node host key fingerprint (required for provision/weights push) | — |
 
+Node IPs must be unique — the gateway identifies nodes by IP.
+
 ## API Endpoints
 
 ### Gateway (port 8000)
@@ -211,7 +213,7 @@ plinth/
 - **No runtime config reload** — Config changes require a restart. SIGHUP is not supported because the monitor, handler, and servers do not support runtime config propagation.
 - **No per-node model awareness** — Routing uses ring membership from config: ring models round-robin among that ring's nodes, all other models round-robin among ring-less nodes. The gateway does not verify which models each node actually serves.
 - **No streaming support** — The proxy buffers full responses; SSE streaming is not yet implemented.
-- **No retry on proxy failure** — If a selected node fails mid-request, the request is not retried on another healthy node.
+- **Connection-level retry only** — Requests whose proxy attempt fails to establish a connection (or times out before any response) are retried on other nodes in the pool. HTTP errors from vLLM are never retried (completions are not idempotent), and errors after response headers start return 502. Retrying on a *response-header timeout* carries a small duplicate-generation risk.
 - **Provisioning** — `plinth provision` installs drivers, Python, vLLM, the service user, and model weights, but not systemd services; service setup remains in `scripts/provision-node.sh`.
 
 ## License and Copyright
