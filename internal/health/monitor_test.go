@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -574,4 +575,96 @@ func extractPort(url string) int {
 		}
 	}
 	return 0
+}
+
+func TestCheckAllSkipsNodeWithInFlightRecheck(t *testing.T) {
+	release := make(chan struct{})
+	var hits atomic.Int32
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-release
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer blocked.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "n", VLLMPort: extractPort(blocked.URL), MetricsPort: 1},
+		},
+	}
+	mon := NewMonitor(cfg)
+
+	mon.Recheck("127.0.0.1")
+	waitForCondition(t, time.Second, "recheck probe in flight", func() bool { return hits.Load() == 1 })
+
+	done := make(chan struct{})
+	go func() { mon.checkAll(); close(done) }()
+
+	select {
+	case <-done:
+		// guarded: checkAll skipped the busy node and returned immediately
+	case <-time.After(200 * time.Millisecond):
+		// unguarded: checkAll is blocked on the release channel; unblock below
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkAll did not return")
+	}
+
+	waitForCondition(t, time.Second, "failure recorded", func() bool {
+		return mon.GetNodeStates()[0].ConsecutiveFailures >= 1
+	})
+	time.Sleep(50 * time.Millisecond)
+	if got := mon.GetNodeStates()[0].ConsecutiveFailures; got != 1 {
+		t.Errorf("ConsecutiveFailures = %d, want 1 (second admission would double-count)", got)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("health endpoint hits = %d, want 1", got)
+	}
+}
+
+func TestRecheckNoOpWhenCheckInFlight(t *testing.T) {
+	release := make(chan struct{})
+	var hits atomic.Int32
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-release
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer blocked.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "n", VLLMPort: extractPort(blocked.URL), MetricsPort: 1},
+		},
+	}
+	mon := NewMonitor(cfg)
+
+	done := make(chan struct{})
+	go func() { mon.checkAll(); close(done) }()
+	waitForCondition(t, time.Second, "cycle probe in flight", func() bool { return hits.Load() == 1 })
+
+	mon.Recheck("127.0.0.1") // must not spawn a second probe
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkAll did not return")
+	}
+
+	waitForCondition(t, time.Second, "failure recorded", func() bool {
+		return mon.GetNodeStates()[0].ConsecutiveFailures >= 1
+	})
+	time.Sleep(50 * time.Millisecond)
+	if got := mon.GetNodeStates()[0].ConsecutiveFailures; got != 1 {
+		t.Errorf("ConsecutiveFailures = %d, want 1 (admitted Recheck would double-count)", got)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("health endpoint hits = %d, want 1", got)
+	}
 }
