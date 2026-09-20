@@ -105,6 +105,14 @@ func classifyProxyError(err error) attemptOutcome {
 	return outcomeFail
 }
 
+// isWriteOpError reports whether err is a network write-phase failure, i.e. a
+// stale keep-alive connection reset while uploading the request. Such errors
+// strongly suggest a dead node; read-side errors do not.
+func isWriteOpError(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "write"
+}
+
 func proxyAttempt(r *http.Request, host string, port int, path string) (*attemptResult, error) {
 	target, err := url.Parse(fmt.Sprintf("http://%s:%d", host, port))
 	if err != nil {

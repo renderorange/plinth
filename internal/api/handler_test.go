@@ -830,6 +830,60 @@ func TestProxyToVLLMOfflineNodeSkippedNextRequest(t *testing.T) {
 	}
 }
 
+func TestProxyToVLLMFailsOverToDegradedNode(t *testing.T) {
+	var goodHits atomic.Int64
+	good := newServerOn(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		goodHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[]}`)
+	}))
+	defer good.Close()
+	u, _ := url.Parse(good.URL)
+	goodPort, _ := strconv.Atoi(u.Port())
+
+	h := handlerWithNodes(t, []config.NodeConfig{
+		{IP: "127.0.0.1", Name: "dead", VLLMPort: 1, MetricsPort: 1},
+		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+	})
+
+	h.mon.Recheck("127.0.0.2")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		degraded := false
+		for _, s := range h.mon.GetNodeStates() {
+			if s.IP == "127.0.0.2" && s.Status == health.Degraded {
+				degraded = true
+			}
+		}
+		if degraded {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for good node to become Degraded")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (degraded survivor must be reachable)", w.Code)
+	}
+	if goodHits.Load() != 1 {
+		t.Fatalf("good node POST hits = %d, want 1", goodHits.Load())
+	}
+}
+
 func TestProxyToVLLMTruncatedResponseIs502NoRetry(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

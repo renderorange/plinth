@@ -232,12 +232,19 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 
 	tried := make(map[string]bool)
 	for i := 0; i < len(filtered); i++ {
-		node, err := h.bal.Select(filtered)
-		if err != nil {
+		candidates := make([]health.NodeState, 0, len(filtered))
+		for _, s := range filtered {
+			if tried[s.IP] || h.offline.skip(s.IP) {
+				continue
+			}
+			candidates = append(candidates, s)
+		}
+		if len(candidates) == 0 {
 			break
 		}
-		if tried[node.IP] || h.offline.skip(node.IP) {
-			continue
+		node, err := h.bal.Select(candidates)
+		if err != nil {
+			break
 		}
 		tried[node.IP] = true
 
@@ -282,6 +289,11 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 			http.Error(w, "upstream node error", http.StatusBadGateway)
 			metrics.RequestDuration.Observe(time.Since(start).Seconds())
 			metrics.RequestsTotal.WithLabelValues(modelName, "502").Inc()
+			if isWriteOpError(res.err) {
+				if h.offline.mark(node.IP) {
+					h.mon.Recheck(node.IP)
+				}
+			}
 			return
 		case outcomeClientAborted:
 			return

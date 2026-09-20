@@ -61,6 +61,26 @@ func (e *timeoutError) Error() string   { return "i/o timeout" }
 func (e *timeoutError) Timeout() bool   { return true }
 func (e *timeoutError) Temporary() bool { return true }
 
+func TestIsWriteOpError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"write op error", &net.OpError{Op: "write", Net: "tcp", Err: syscall.ECONNRESET}, true},
+		{"read op error", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, false},
+		{"unexpected EOF", io.ErrUnexpectedEOF, false},
+		{"wrapped write op error", &url.Error{Op: "Post", Err: &net.OpError{Op: "write", Net: "tcp", Err: syscall.ECONNRESET}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isWriteOpError(tt.err); got != tt.want {
+				t.Errorf("isWriteOpError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProxyAttemptSuccess(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
