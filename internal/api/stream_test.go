@@ -395,7 +395,14 @@ func TestStreamAttemptDialRefused(t *testing.T) {
 	}
 }
 
-func TestStreamAttemptCapturesMidStreamErrorCommitted(t *testing.T) {
+// Amendment B (post-run): the original plan backend wrote a data chunk then
+// reset, but that races ACK-vs-RST on loopback: on the CI-pinned go1.22.12
+// the reset sometimes surfaces as clean EOF after data delivery, so gate.err
+// was nil in a subset of count=10 runs. A headers-only-then-RST backend has
+// no data to race: the body read must fail before any byte is delivered,
+// making "reset before commit leaves the gate clean" deterministic. Renamed
+// accordingly (the committed-truncated case is T6's handler-level concern).
+func TestStreamAttemptCapturesResetBeforeCommit(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -407,7 +414,7 @@ func TestStreamAttemptCapturesMidStreamErrorCommitted(t *testing.T) {
 			if err != nil {
 				return
 			}
-			io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: first\n\n")
+			io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
 			conn.(*net.TCPConn).SetLinger(0)
 			conn.Close()
 		}
@@ -415,7 +422,7 @@ func TestStreamAttemptCapturesMidStreamErrorCommitted(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
-	rec.Code = 0 // amendment: NewRecorder() defaults Code to 200; reset so "nothing committed" is observable
+	rec.Code = 0 // amendment: httptest recorder defaults Code to 200
 	gate := newCommitGate(rec)
 
 	port := ln.Addr().(*net.TCPAddr).Port
@@ -423,13 +430,13 @@ func TestStreamAttemptCapturesMidStreamErrorCommitted(t *testing.T) {
 		t.Fatalf("streamAttempt: %v", err)
 	}
 	if gate.err == nil {
-		t.Fatal("expected mid-stream error capture")
+		t.Fatal("expected transport error from reset stream")
 	}
-	if rec.Code != 0 && rec.Code != 200 {
-		t.Errorf("recorder code = %d, want 0 or 200", rec.Code)
+	if gate.committed {
+		t.Fatal("gate committed on reset before first chunk")
 	}
-	if rec.Code == 0 && gate.committed {
-		t.Fatal("gate committed despite nothing reaching the recorder")
+	if rec.Code != 0 {
+		t.Errorf("recorder code = %d, want 0 (nothing written)", rec.Code)
 	}
 }
 
