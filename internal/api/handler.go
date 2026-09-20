@@ -199,7 +199,8 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 	r.Body.Close()
 
 	var body struct {
-		Model string `json:"model"`
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -259,6 +260,44 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 		r.Body = io.NopCloser(bytes.NewReader(forwardRaw))
 		if len(forwardRaw) != len(raw) {
 			r.ContentLength = int64(len(forwardRaw))
+		}
+
+		if body.Stream {
+			gate := newCommitGate(w)
+			err = streamAttempt(r, node.IP, port, path, gate)
+			if err != nil {
+				http.Error(w, "failed to parse proxy target URL", http.StatusInternalServerError)
+				metrics.RequestDuration.Observe(time.Since(start).Seconds())
+				metrics.RequestsTotal.WithLabelValues(modelName, "500").Inc()
+				return
+			}
+			switch {
+			case gate.err == nil:
+				if !gate.committed {
+					gate.commit()
+				}
+				h.offline.clear(node.IP)
+				metrics.RequestDuration.Observe(time.Since(start).Seconds())
+				metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", gate.status)).Inc()
+				metrics.ProxyAttemptsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", gate.status)).Inc()
+				return
+			case gate.committed:
+				log.Error("stream terminated by upstream failure", "node", node.IP, "error", gate.err.Error())
+				metrics.ProxyAttemptsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", gate.status)).Inc()
+				metrics.RequestDuration.Observe(time.Since(start).Seconds())
+				metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", gate.status)).Inc()
+				return
+			default:
+				if classifyProxyError(gate.err) == outcomeClientAborted {
+					return
+				}
+				log.Info("retrying after streaming failure before first chunk", "node", node.IP, "error", gate.err.Error())
+				metrics.ProxyAttemptsTotal.WithLabelValues(modelName, "502").Inc()
+				if h.offline.mark(node.IP) {
+					h.mon.Recheck(node.IP)
+				}
+			}
+			continue
 		}
 
 		res, err := proxyAttempt(r, node.IP, port, path)

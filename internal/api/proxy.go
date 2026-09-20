@@ -114,18 +114,12 @@ func isWriteOpError(err error) bool {
 }
 
 func proxyAttempt(r *http.Request, host string, port int, path string) (*attemptResult, error) {
-	target, err := url.Parse(fmt.Sprintf("http://%s:%d", host, port))
+	proxy, err := newProxy(host, port, path, r)
 	if err != nil {
 		return nil, err
 	}
-	r.URL.Path = path
-	r.URL.RawPath = ""
-	r.URL.RawQuery = ""
 
 	buf := &bufferedRecorder{header: make(http.Header)}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = proxyTransport
-	proxy.FlushInterval = -1
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
 		buf.err = err
 	}
@@ -143,6 +137,21 @@ func proxyAttempt(r *http.Request, host string, port int, path string) (*attempt
 		body:   buf.body.Bytes(),
 		err:    buf.err,
 	}, nil
+}
+
+func newProxy(host string, port int, path string, r *http.Request) (*httputil.ReverseProxy, error) {
+	target, err := url.Parse(fmt.Sprintf("http://%s:%d", host, port))
+	if err != nil {
+		return nil, err
+	}
+	r.URL.Path = path
+	r.URL.RawPath = ""
+	r.URL.RawQuery = ""
+
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = proxyTransport
+	proxy.FlushInterval = -1
+	return proxy, nil
 }
 
 func commitResponse(w http.ResponseWriter, res *attemptResult) {
