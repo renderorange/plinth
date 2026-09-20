@@ -85,6 +85,17 @@ func TestRequestsTotalCanBeIncremented(t *testing.T) {
 	}
 }
 
+func TestHealthCheckPanicsTotalRegistered(t *testing.T) {
+	HealthCheckPanicsTotal.Inc()
+	m := &dto.Metric{}
+	if err := HealthCheckPanicsTotal.Write(m); err != nil {
+		t.Fatalf("HealthCheckPanicsTotal not registered or not writable: %v", err)
+	}
+	if got := m.GetCounter().GetValue(); got < 1 {
+		t.Errorf("HealthCheckPanicsTotal value = %f, want >= 1", got)
+	}
+}
+
 func TestProxyAttemptsTotalMetricRegistered(t *testing.T) {
 	v := ProxyAttemptsTotal.WithLabelValues("model1", "502")
 	if err := v.Write(&dto.Metric{}); err != nil {

@@ -11,15 +11,18 @@ import (
 	"time"
 
 	"plinth/internal/config"
+	"plinth/internal/log"
+	"plinth/internal/metrics"
 )
 
 type Monitor struct {
-	cfg    *config.Config
-	client *http.Client
-	nodes  map[string]*NodeState
-	mu     sync.RWMutex
-	stop   chan struct{}
-	done   chan struct{}
+	cfg      *config.Config
+	client   *http.Client
+	nodes    map[string]*NodeState
+	checking map[string]bool
+	mu       sync.RWMutex
+	stop     chan struct{}
+	done     chan struct{}
 }
 
 func NewMonitor(cfg *config.Config) *Monitor {
@@ -36,9 +39,10 @@ func NewMonitor(cfg *config.Config) *Monitor {
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		nodes: nodes,
-		stop:  make(chan struct{}),
-		done:  make(chan struct{}),
+		nodes:    nodes,
+		checking: make(map[string]bool),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 }
 
@@ -81,7 +85,7 @@ func (m *Monitor) Recheck(ip string) {
 	if !found {
 		return
 	}
-	go m.checkNode(nc)
+	go m.runCheck(nc)
 }
 
 func (m *Monitor) loop() {
@@ -94,6 +98,11 @@ func (m *Monitor) loop() {
 	for {
 		select {
 		case <-ticker.C:
+			select {
+			case <-m.stop:
+				return
+			default:
+			}
 			m.checkAll()
 		case <-m.stop:
 			return
@@ -101,13 +110,34 @@ func (m *Monitor) loop() {
 	}
 }
 
+func (m *Monitor) runCheck(nc config.NodeConfig) {
+	defer func() {
+		if r := recover(); r != nil {
+			metrics.HealthCheckPanicsTotal.Inc()
+			log.Error("health check panicked", "node", nc.IP, "panic", fmt.Sprint(r))
+		}
+	}()
+	m.checkNode(nc)
+}
+
 func (m *Monitor) checkAll() {
+	var wg sync.WaitGroup
 	for _, nc := range m.cfg.Nodes {
-		m.checkNode(nc)
+		wg.Add(1)
+		go func(nc config.NodeConfig) {
+			defer wg.Done()
+			m.runCheck(nc)
+		}(nc)
 	}
+	wg.Wait()
 }
 
 func (m *Monitor) checkNode(nc config.NodeConfig) {
+	if !m.tryStart(nc.IP) {
+		return
+	}
+	defer m.finish(nc.IP)
+
 	m.mu.Lock()
 	node := m.nodes[nc.IP]
 	m.mu.Unlock()
@@ -145,6 +175,22 @@ func (m *Monitor) checkNode(nc config.NodeConfig) {
 			}
 		}
 	}
+}
+
+func (m *Monitor) tryStart(ip string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.checking[ip] {
+		return false
+	}
+	m.checking[ip] = true
+	return true
+}
+
+func (m *Monitor) finish(ip string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.checking, ip)
 }
 
 type gpuMetricsRaw struct {
