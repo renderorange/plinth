@@ -2,13 +2,17 @@ package api
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 )
 
@@ -25,31 +29,143 @@ func extractPort(t *testing.T, serverURL string) int {
 	return port
 }
 
-func TestProxyRequest_ValidTarget(t *testing.T) {
-	var receivedPath atomic.Value
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedPath.Store(r.URL.Path)
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-	}))
-	defer backend.Close()
-
-	port := extractPort(t, backend.URL)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-
-	proxyRequest(rec, req, "127.0.0.1", port, "/v1/chat/completions")
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, rec.Code)
+func TestClassifyProxyError(t *testing.T) {
+	timeoutErr := &timeoutError{} // Timeout() true
+	tests := []struct {
+		name string
+		err  error
+		want attemptOutcome
+	}{
+		{"nil is OK", nil, outcomeOK},
+		{"dial refused retries", &url.Error{Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}, outcomeRetry},
+		{"dial timeout retries", &url.Error{Err: &net.OpError{Op: "dial", Net: "tcp", Err: timeoutErr}}, outcomeRetry},
+		{"non-dial timeout retries", timeoutErr, outcomeRetry},
+		{"deadline exceeded is client aborted", context.DeadlineExceeded, outcomeClientAborted},
+		{"canceled is client aborted", context.Canceled, outcomeClientAborted},
+		{"read reset is fail", &url.Error{Err: &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}}, outcomeFail},
+		{"write reset is fail", &url.Error{Err: &net.OpError{Op: "write", Net: "tcp", Err: syscall.ECONNRESET}}, outcomeFail},
+		{"truncation is fail", io.ErrUnexpectedEOF, outcomeFail},
 	}
-	if p, ok := receivedPath.Load().(string); !ok || p != "/v1/chat/completions" {
-		t.Errorf("backend received path = %q, want /v1/chat/completions", receivedPath.Load())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyProxyError(tt.err); got != tt.want {
+				t.Errorf("classifyProxyError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 
-func TestProxyRequest_ForwardsBody(t *testing.T) {
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string   { return "i/o timeout" }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return true }
+
+func TestProxyAttemptSuccess(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer backend.Close()
+	port := extractPort(t, backend.URL)
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"prompt":"hi"}`))
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions")
+	if err != nil {
+		t.Fatalf("proxyAttempt error: %v", err)
+	}
+	if res.err != nil {
+		t.Fatalf("res.err = %v, want nil", res.err)
+	}
+	if res.status != http.StatusCreated {
+		t.Errorf("status = %d, want 201", res.status)
+	}
+	if got := res.header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q", got)
+	}
+	if string(res.body) != `{"ok":true}` {
+		t.Errorf("body = %q", res.body)
+	}
+}
+
+func TestProxyAttemptDialRefused(t *testing.T) {
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
+	res, err := proxyAttempt(req, "127.0.0.1", 1, "/v1/completions")
+	if err != nil {
+		t.Fatalf("proxyAttempt error: %v", err)
+	}
+	if res.err == nil {
+		t.Fatal("expected transport error for refused dial")
+	}
+	if classifyProxyError(res.err) != outcomeRetry {
+		t.Errorf("classify = %v, want outcomeRetry", classifyProxyError(res.err))
+	}
+	if res.status != 0 {
+		t.Errorf("status = %d, want 0 (nothing written on failure)", res.status)
+	}
+}
+
+func TestProxyAttemptTruncatedBodyIsFail(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+	}()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions")
+	if err != nil {
+		t.Fatalf("proxyAttempt error: %v", err)
+	}
+	if res.err == nil {
+		t.Fatal("expected body read error for truncated response")
+	}
+	if classifyProxyError(res.err) != outcomeFail {
+		t.Errorf("classify = %v, want outcomeFail (no retry after headers)", classifyProxyError(res.err))
+	}
+}
+
+func TestProxyAttemptInvalidTargetHost(t *testing.T) {
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
+	if _, err := proxyAttempt(req, "bad host", 80, "/v1/completions"); err == nil {
+		t.Fatal("expected parse error for malformed host")
+	}
+}
+
+func TestProxyAttemptRoundTrip(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+	port := extractPort(t, backend.URL)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/chat/completions")
+	if err != nil || res.err != nil {
+		t.Fatalf("attempt failed: proxyAttempt err=%v res.err=%v", err, res.err)
+	}
+	rec := httptest.NewRecorder()
+	commitResponse(rec, res)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if rec.Body.String() != "ok" {
+		t.Errorf("body = %q, want %q", rec.Body.String(), "ok")
+	}
+}
+
+func TestProxyAttemptForwardsBody(t *testing.T) {
 	payload := `{"model":"test","messages":[]}`
 	var receivedBody string
 
@@ -68,10 +184,13 @@ func TestProxyRequest_ForwardsBody(t *testing.T) {
 
 	port := extractPort(t, backend.URL)
 
-	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(payload))
-
-	proxyRequest(rec, req, "127.0.0.1", port, "/v1/chat/completions")
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/chat/completions")
+	if err != nil || res.err != nil {
+		t.Fatalf("attempt failed: proxyAttempt err=%v res.err=%v", err, res.err)
+	}
+	rec := httptest.NewRecorder()
+	commitResponse(rec, res)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status %d, got %d", http.StatusOK, rec.Code)
@@ -81,20 +200,7 @@ func TestProxyRequest_ForwardsBody(t *testing.T) {
 	}
 }
 
-func TestProxyRequest_InvalidHost(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/test", nil)
-
-	proxyRequest(rec, req, "256.256.256.256", 80, "/test")
-
-	// The reverse proxy may return 502 or 500 on connection failure
-	// At minimum, verify it doesn't panic and doesn't return 200
-	if rec.Code == http.StatusOK {
-		t.Error("expected non-200 for invalid host, got 200")
-	}
-}
-
-func TestProxyRequest_ForwardsHeaders(t *testing.T) {
+func TestProxyAttemptForwardsHeaders(t *testing.T) {
 	var receivedContentType atomic.Value
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedContentType.Store(r.Header.Get("Content-Type"))
@@ -104,18 +210,22 @@ func TestProxyRequest_ForwardsHeaders(t *testing.T) {
 
 	port := extractPort(t, backend.URL)
 
-	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 
-	proxyRequest(rec, req, "127.0.0.1", port, "/v1/chat/completions")
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/chat/completions")
+	if err != nil || res.err != nil {
+		t.Fatalf("attempt failed: proxyAttempt err=%v res.err=%v", err, res.err)
+	}
+	rec := httptest.NewRecorder()
+	commitResponse(rec, res)
 
 	if ct, ok := receivedContentType.Load().(string); !ok || ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", receivedContentType.Load())
 	}
 }
 
-func TestProxyRequest_PathForwarded(t *testing.T) {
+func TestProxyAttemptPathForwarded(t *testing.T) {
 	var receivedPath atomic.Value
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath.Store(r.URL.Path)
@@ -125,10 +235,13 @@ func TestProxyRequest_PathForwarded(t *testing.T) {
 
 	port := extractPort(t, backend.URL)
 
-	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/completions", nil)
-
-	proxyRequest(rec, req, "127.0.0.1", port, "/v1/completions")
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions")
+	if err != nil || res.err != nil {
+		t.Fatalf("attempt failed: proxyAttempt err=%v res.err=%v", err, res.err)
+	}
+	rec := httptest.NewRecorder()
+	commitResponse(rec, res)
 
 	if p, ok := receivedPath.Load().(string); !ok || p != "/v1/completions" {
 		t.Errorf("path = %q, want /v1/completions", receivedPath.Load())
