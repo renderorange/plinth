@@ -151,6 +151,10 @@ func commitResponse(w http.ResponseWriter, res *attemptResult) {
 			w.Header().Add(k, v)
 		}
 	}
-	w.WriteHeader(res.status)
+	status := res.status
+	if status == 0 {
+		status = http.StatusBadGateway
+	}
+	w.WriteHeader(status)
 	_, _ = w.Write(res.body)
 }

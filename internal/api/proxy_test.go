@@ -185,6 +185,19 @@ func TestProxyAttemptRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCommitResponseZeroStatusDefaultsTo502(t *testing.T) {
+	res := &attemptResult{
+		status: 0,
+		header: make(http.Header),
+		body:   []byte(`{"error":"upstream"}`),
+	}
+	rec := httptest.NewRecorder()
+	commitResponse(rec, res)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d (zero status must not reach WriteHeader)", rec.Code, http.StatusBadGateway)
+	}
+}
+
 func TestProxyAttemptForwardsBody(t *testing.T) {
 	payload := `{"model":"test","messages":[]}`
 	var receivedBody string

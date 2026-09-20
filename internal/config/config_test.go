@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -356,6 +357,8 @@ func TestValidateDuplicateNodeIPs(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for duplicate node IPs, got nil")
+	} else if !strings.Contains(err.Error(), "duplicate node IP") {
+		t.Errorf("error = %q, want message containing %q", err.Error(), "duplicate node IP")
 	}
 }
 

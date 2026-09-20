@@ -202,5 +202,5 @@ Common HTTP status codes:
 | 400 | Bad request (invalid body) |
 | 413 | Request body too large |
 | 500 | Internal server error |
-| 502 | Connection to the node lost after the response started |
+| 502 | Connection to the node lost after the response started (response truncated) |
 | 503 | No healthy node available (pool empty) or no reachable node available (all proxy attempts failed) |

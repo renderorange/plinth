@@ -90,4 +90,12 @@ func TestProxyAttemptsTotalMetricRegistered(t *testing.T) {
 	if err := v.Write(&dto.Metric{}); err != nil {
 		t.Fatalf("ProxyAttemptsTotal not registered or not writable: %v", err)
 	}
+	v.Inc()
+	m := &dto.Metric{}
+	if err := v.Write(m); err != nil {
+		t.Fatalf("ProxyAttemptsTotal not registered or not writable: %v", err)
+	}
+	if got := m.GetCounter().GetValue(); got != 1 {
+		t.Errorf("ProxyAttemptsTotal value = %f, want 1", got)
+	}
 }
