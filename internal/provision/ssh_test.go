@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"plinth/internal/config"
 )
 
 func writeClientKey(t *testing.T) string {
@@ -148,5 +150,30 @@ func TestNewSSHClientRejectsWrongFingerprint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mismatch") {
 		t.Errorf("error = %q, want mention of fingerprint mismatch", err)
+	}
+}
+
+func TestSSHConfigFrom(t *testing.T) {
+	cfg := config.ProvisionConfig{
+		SSHKeyPath: "/home/test/.ssh/id_ed25519",
+		SSHUser:    "ubuntu",
+		SSHPort:    2222,
+		SSHHostKey: "SHA256:ABCD1234",
+	}
+	got := SSHConfigFrom(cfg)
+	if got.KeyPath != cfg.SSHKeyPath {
+		t.Errorf("KeyPath = %q, want %q", got.KeyPath, cfg.SSHKeyPath)
+	}
+	if got.User != cfg.SSHUser {
+		t.Errorf("User = %q, want %q", got.User, cfg.SSHUser)
+	}
+	if got.Port != cfg.SSHPort {
+		t.Errorf("Port = %d, want %d", got.Port, cfg.SSHPort)
+	}
+	if got.HostKey != cfg.SSHHostKey {
+		t.Errorf("HostKey = %q, want %q", got.HostKey, cfg.SSHHostKey)
+	}
+	if got.Timeout != 0 {
+		t.Errorf("Timeout = %v, want 0 (withDefaults applies on connect)", got.Timeout)
 	}
 }
