@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"plinth/internal/balancer"
@@ -20,44 +21,36 @@ import (
 var maxBodyBytes int64 = 32 << 20
 
 type Handler struct {
-	cfg        *config.Config
-	mon        *health.Monitor
-	bal        *balancer.Balancer
-	mux        *http.ServeMux
-	rings      map[string]map[string]bool
-	standalone map[string]bool
-	offline    *offlineSet
+	state   atomic.Pointer[snapshot]
+	bal     *balancer.Balancer
+	mux     *http.ServeMux
+	offline *offlineSet
 }
 
 func NewHandler(cfg *config.Config, mon *health.Monitor, bal *balancer.Balancer) *Handler {
-	rings := make(map[string]map[string]bool)
-	standalone := make(map[string]bool)
-	for _, n := range cfg.Nodes {
-		if n.Ring != "" {
-			ips := rings[n.Ring]
-			if ips == nil {
-				ips = make(map[string]bool)
-				rings[n.Ring] = ips
-			}
-			ips[n.IP] = true
-		} else {
-			standalone[n.IP] = true
-		}
-	}
 	h := &Handler{
-		cfg:        cfg,
-		mon:        mon,
-		bal:        bal,
-		mux:        http.NewServeMux(),
-		rings:      rings,
-		standalone: standalone,
-		offline:    newOfflineSet(),
+		bal:     bal,
+		mux:     http.NewServeMux(),
+		offline: newOfflineSet(),
 	}
+	h.state.Store(newSnapshot(cfg, mon))
 	h.mux.HandleFunc("GET /health", h.handleHealth)
 	h.mux.HandleFunc("GET /v1/models", h.handleModels)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.handleChatCompletions)
 	h.mux.HandleFunc("POST /v1/completions", h.handleCompletions)
 	return h
+}
+
+// UpdateConfig swaps the serving configuration and monitor atomically.
+// Requests already in flight keep the previous snapshot until they complete.
+// The caller owns the superseded monitor and must stop it after this returns.
+func (h *Handler) UpdateConfig(cfg *config.Config, mon *health.Monitor) {
+	h.state.Store(newSnapshot(cfg, mon))
+}
+
+// Config returns the configuration currently serving requests.
+func (h *Handler) Config() *config.Config {
+	return h.state.Load().cfg
 }
 
 type offlineSet struct {
@@ -98,21 +91,12 @@ func (o *offlineSet) clear(ip string) {
 	delete(o.until, ip)
 }
 
-func portForNode(cfg *config.Config, ip string) (int, bool) {
-	for _, nc := range cfg.Nodes {
-		if nc.IP == ip {
-			return nc.VLLMPort, true
-		}
-	}
-	return 0, false
-}
-
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
-	states := h.mon.GetNodeStates()
+	states := h.state.Load().mon.GetNodeStates()
 	healthy := 0
 	for _, s := range states {
 		if s.Status == health.Healthy {
@@ -145,7 +129,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var data []modelEntry
-	for _, m := range h.cfg.Models.Available {
+	for _, m := range h.state.Load().cfg.Models.Available {
 		data = append(data, modelEntry{
 			ID:      m.Name,
 			Object:  "model",
@@ -169,21 +153,12 @@ func (h *Handler) handleCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) filterByRing(states []health.NodeState, modelName string) []health.NodeState {
-	pool := h.standalone
-	if ring := h.cfg.ModelRing(modelName); ring != "" {
-		pool = h.rings[ring]
-	}
-	var filtered []health.NodeState
-	for _, s := range states {
-		if pool[s.IP] {
-			filtered = append(filtered, s)
-		}
-	}
-	return filtered
+	return h.state.Load().filterByRing(states, modelName)
 }
 
 func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path string) {
 	start := time.Now()
+	st := h.state.Load()
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	raw, err := io.ReadAll(r.Body)
@@ -210,11 +185,11 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 	modelName := body.Model
 	forwardRaw := raw
 	if modelName == "" {
-		if h.cfg.Models.Default == "" {
+		if st.cfg.Models.Default == "" {
 			http.Error(w, "model not specified and no default model is configured", http.StatusBadRequest)
 			return
 		}
-		modelName = h.cfg.Models.Default
+		modelName = st.cfg.Models.Default
 		forwardRaw, err = injectModel(raw, modelName)
 		if err != nil {
 			http.Error(w, "failed to apply default model to request body", http.StatusInternalServerError)
@@ -222,8 +197,8 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 		}
 	}
 
-	states := h.mon.GetNodeStates()
-	filtered := h.filterByRing(states, modelName)
+	states := st.mon.GetNodeStates()
+	filtered := st.filterByRing(states, modelName)
 	if len(filtered) == 0 {
 		http.Error(w, "no healthy node available", http.StatusServiceUnavailable)
 		metrics.RequestDuration.Observe(time.Since(start).Seconds())
@@ -249,7 +224,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 		}
 		tried[node.IP] = true
 
-		port, ok := portForNode(h.cfg, node.IP)
+		port, ok := st.portForNode(node.IP)
 		if !ok {
 			http.Error(w, "selected node not found in configuration", http.StatusInternalServerError)
 			metrics.RequestDuration.Observe(time.Since(start).Seconds())
@@ -294,7 +269,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 				log.Info("retrying after streaming failure before first chunk", "node", node.IP, "error", gate.err.Error())
 				metrics.ProxyAttemptsTotal.WithLabelValues(modelName, "502").Inc()
 				if h.offline.mark(node.IP) {
-					h.mon.Recheck(node.IP)
+					st.mon.Recheck(node.IP)
 				}
 			}
 			continue
@@ -320,7 +295,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 			log.Info("retrying after connection failure", "node", node.IP, "error", res.err.Error())
 			metrics.ProxyAttemptsTotal.WithLabelValues(modelName, "502").Inc()
 			if h.offline.mark(node.IP) {
-				h.mon.Recheck(node.IP)
+				st.mon.Recheck(node.IP)
 			}
 		case outcomeFail:
 			log.Error("node response truncated or connection lost", "node", node.IP, "error", res.err.Error())
@@ -330,7 +305,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 			metrics.RequestsTotal.WithLabelValues(modelName, "502").Inc()
 			if isWriteOpError(res.err) {
 				if h.offline.mark(node.IP) {
-					h.mon.Recheck(node.IP)
+					st.mon.Recheck(node.IP)
 				}
 			}
 			return
