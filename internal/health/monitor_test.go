@@ -861,6 +861,95 @@ func TestStopDrainsInFlightRound(t *testing.T) {
 	}
 }
 
+func TestNewMonitorWithStateCarriesOverStatus(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			HealthInterval:      time.Second,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+			{IP: "10.0.0.2", Name: "node-2"},
+		},
+	}
+
+	prev := []NodeState{
+		{IP: "10.0.0.1", Status: Dead, ConsecutiveFailures: 5},
+		{IP: "10.0.0.9", Status: Degraded, ConsecutiveFailures: 1},
+		{IP: "10.0.0.2", Status: Degraded, ConsecutiveFailures: 2},
+	}
+
+	mon := NewMonitorWithState(cfg, prev)
+
+	states := mon.GetNodeStates()
+	if len(states) != 2 {
+		t.Fatalf("states = %d, want 2 (only nodes from the newest config)", len(states))
+	}
+
+	byIP := make(map[string]NodeState, len(states))
+	for _, s := range states {
+		byIP[s.IP] = s
+	}
+
+	if s := byIP["10.0.0.1"]; s.Status != Dead || s.ConsecutiveFailures != 5 {
+		t.Errorf("10.0.0.1 = status %v failures %d, want Dead with 5 carried over", s.Status, s.ConsecutiveFailures)
+	}
+	if s := byIP["10.0.0.2"]; s.Status != Degraded || s.ConsecutiveFailures != 2 {
+		t.Errorf("10.0.0.2 = status %v failures %d, want Degraded with 2 carried over", s.Status, s.ConsecutiveFailures)
+	}
+	if _, ok := byIP["10.0.0.9"]; ok {
+		t.Error("removed node 10.0.0.9 must not appear in the new monitor")
+	}
+}
+
+func TestNewMonitorWithStateFreshNodesStartHealthy(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			HealthInterval:      time.Second,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "fresh-node"},
+		},
+	}
+
+	prev := []NodeState{
+		{IP: "10.0.0.9", Status: Dead, ConsecutiveFailures: 4},
+	}
+
+	mon := NewMonitorWithState(cfg, prev)
+
+	states := mon.GetNodeStates()
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if states[0].Status != Healthy || states[0].ConsecutiveFailures != 0 {
+		t.Errorf("fresh node = status %v failures %d, want Healthy with 0", states[0].Status, states[0].ConsecutiveFailures)
+	}
+}
+
+func TestNewMonitorWithStateEmptyPrevAllHealthy(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			HealthInterval:      time.Second,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "node-1"},
+		},
+	}
+
+	mon := NewMonitorWithState(cfg, nil)
+
+	states := mon.GetNodeStates()
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if states[0].Status != Healthy || states[0].ConsecutiveFailures != 0 {
+		t.Errorf("node = status %v failures %d, want Healthy with 0", states[0].Status, states[0].ConsecutiveFailures)
+	}
+}
+
 func TestStopDoesNotStartNewRound(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -889,4 +978,17 @@ func TestStopDoesNotStartNewRound(t *testing.T) {
 			t.Errorf("iteration %d: health endpoint hits = %d, want %d (no new round after Stop)", i, got, before+1)
 		}
 	}
+}
+
+func TestStopIsIdempotent(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "test-node"},
+		},
+	}
+	mon := NewMonitor(cfg)
+	mon.Start()
+	mon.Stop()
+	mon.Stop()
 }

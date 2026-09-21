@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,6 +23,15 @@ import (
 	"plinth/internal/version"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	// curMon is the monitor currently serving requests. Reloads swap it and
+	// the metrics ticker and shutdown path read it atomically.
+	curMon atomic.Pointer[health.Monitor]
+
+	// reloadMu serializes reloads so overlapping SIGHUPs cannot tear state.
+	reloadMu sync.Mutex
 )
 
 func main() {
@@ -74,13 +85,16 @@ func run() error {
 	handler := api.NewHandler(cfg, mon, bal)
 
 	mon.Start()
-	defer mon.Stop()
+	curMon.Store(mon)
+	defer func() {
+		curMon.Load().Stop()
+	}()
 
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			states := mon.GetNodeStates()
+			states := curMon.Load().GetNodeStates()
 			var healthy, degraded, dead int
 			for _, s := range states {
 				switch s.Status {
@@ -110,18 +124,21 @@ func run() error {
 		Handler: metricsMux,
 	}
 
-	// NOTE: Config changes require a restart. SIGHUP is not handled because the
-	// monitor, handler, and servers do not support runtime config propagation.
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() {
 		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		<-sig
-		log.Info("shutting down")
-		cancel()
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		for s := range sig {
+			if s == syscall.SIGHUP {
+				reloadConfig(ctx, handler, *configPath)
+				continue
+			}
+			log.Info("shutting down")
+			cancel()
+			return
+		}
 	}()
 
 	serveErr := make(chan error, 2)
@@ -157,4 +174,45 @@ func run() error {
 	log.Info("gateway stopped")
 
 	return serveFailed
+}
+
+func reloadConfig(ctx context.Context, handler *api.Handler, configPath string) {
+	if !reloadMu.TryLock() {
+		log.Info("config reload already in progress; ignoring SIGHUP")
+		return
+	}
+	defer reloadMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	oldCfg := handler.Config()
+	newCfg, err := config.Load(configPath)
+	if err != nil {
+		log.Error("config reload failed; keeping current config", "error", err.Error())
+		return
+	}
+
+	warnListenChanges(oldCfg, newCfg)
+
+	oldMon := curMon.Load()
+	newMon := health.NewMonitorWithState(newCfg, oldMon.GetNodeStates())
+	newMon.Start()
+	handler.UpdateConfig(newCfg, newMon)
+	curMon.Store(newMon)
+	oldMon.Stop()
+
+	log.Info("config reloaded", "nodes", fmt.Sprintf("%d", len(newCfg.Nodes)), "models", fmt.Sprintf("%d", len(newCfg.Models.Available)))
+}
+
+func warnListenChanges(oldCfg, newCfg *config.Config) {
+	if oldCfg.Gateway.Listen != newCfg.Gateway.Listen {
+		log.Warn("gateway.listen changed; requires restart", "old", oldCfg.Gateway.Listen, "new", newCfg.Gateway.Listen)
+	}
+	if oldCfg.Gateway.MetricsListen != newCfg.Gateway.MetricsListen {
+		log.Warn("gateway.metrics_listen changed; requires restart", "old", oldCfg.Gateway.MetricsListen, "new", newCfg.Gateway.MetricsListen)
+	}
 }

@@ -13,6 +13,10 @@ func Info(msg string, kvs ...string) {
 	write("info", msg, kvs...)
 }
 
+func Warn(msg string, kvs ...string) {
+	write("warn", msg, kvs...)
+}
+
 func Error(msg string, kvs ...string) {
 	write("error", msg, kvs...)
 }

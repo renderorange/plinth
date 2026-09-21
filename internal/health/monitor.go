@@ -23,6 +23,7 @@ type Monitor struct {
 	mu       sync.RWMutex
 	stop     chan struct{}
 	done     chan struct{}
+	stopOnce sync.Once
 }
 
 func NewMonitor(cfg *config.Config) *Monitor {
@@ -46,13 +47,38 @@ func NewMonitor(cfg *config.Config) *Monitor {
 	}
 }
 
+// NewMonitorWithState builds a monitor like NewMonitor but seeds health state
+// for IPs present in both the new config and prev: Status and
+// ConsecutiveFailures carry over so a reload does not give flapping nodes a
+// clean slate. Nodes not present in prev start Healthy, matching startup
+// semantics.
+func NewMonitorWithState(cfg *config.Config, prev []NodeState) *Monitor {
+	m := NewMonitor(cfg)
+	prevByIP := make(map[string]NodeState, len(prev))
+	for _, p := range prev {
+		prevByIP[p.IP] = p
+	}
+	for ip, n := range m.nodes {
+		if old, ok := prevByIP[ip]; ok {
+			n.Status = old.Status
+			n.ConsecutiveFailures = old.ConsecutiveFailures
+		}
+	}
+	return m
+}
+
 func (m *Monitor) Start() {
 	go m.loop()
 }
 
+// Stop halts the health-check loop and waits for it to exit. It is safe to
+// call multiple times, including concurrently: the monitor is torn down
+// exactly once.
 func (m *Monitor) Stop() {
-	close(m.stop)
-	<-m.done
+	m.stopOnce.Do(func() {
+		close(m.stop)
+		<-m.done
+	})
 }
 
 func (m *Monitor) GetNodeStates() []NodeState {

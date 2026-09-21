@@ -844,20 +844,36 @@ func TestProxyToVLLMFailsOverToDegradedNode(t *testing.T) {
 		fmt.Fprint(w, `{"choices":[]}`)
 	}))
 	defer good.Close()
+
 	u, _ := url.Parse(good.URL)
 	goodPort, _ := strconv.Atoi(u.Port())
 
-	h := handlerWithNodes(t, []config.NodeConfig{
-		{IP: "127.0.0.1", Name: "dead", VLLMPort: 1, MetricsPort: 1},
-		{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
-	})
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Gateway: config.GatewayConfig{
+			HealthInterval:      100 * time.Millisecond,
+			HealthFailThreshold: 3,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "dead", VLLMPort: 1, MetricsPort: 1},
+			{IP: "127.0.0.2", Name: "good", VLLMPort: goodPort, MetricsPort: goodPort},
+		},
+		Models: config.ModelsConfig{
+			Default: "test/model",
+			Available: []config.ModelConfig{
+				{Name: "test/model", PipelineStages: 1},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	h := NewHandler(cfg, mon, balancer.New())
 
-	h.mon.Recheck("127.0.0.2")
+	mon.Recheck("127.0.0.2")
 
 	deadline := time.After(2 * time.Second)
 	for {
 		degraded := false
-		for _, s := range h.mon.GetNodeStates() {
+		for _, s := range mon.GetNodeStates() {
 			if s.IP == "127.0.0.2" && s.Status == health.Degraded {
 				degraded = true
 			}
