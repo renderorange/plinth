@@ -210,7 +210,7 @@ plinth/
 
 ## Limitations
 
-- **No runtime config reload** — Config changes require a restart. SIGHUP is not supported because the monitor, handler, and servers do not support runtime config propagation.
+- **Config reload** — `SIGHUP` reloads nodes, models, rings, and health settings at runtime. In-flight requests finish against the old config; health state carries over for unchanged nodes; an invalid config is rejected with the current config kept. Listen address changes require a restart.
 - **No per-node model awareness** — Routing uses ring membership from config: ring models round-robin among that ring's nodes, all other models round-robin among ring-less nodes. The gateway does not verify which models each node actually serves.
 - **Streaming** — `stream: true` completion requests are streamed chunk-by-chunk to the client. Retry is allowed until the first chunk is flushed; once committed, an upstream failure terminates the stream (clean EOF, no fabricated `[DONE]`, never a 502 after commit). Stalled streams without a first chunk are abandoned and retried after a fixed 10s deadline. Non-streaming requests keep the buffered-attempt behavior.
 - **Connection-level retry only** — Requests whose proxy attempt fails to establish a connection (or times out before any response) are retried on other nodes in the pool. HTTP errors from vLLM are never retried (completions are not idempotent), and errors after response headers start return 502. Retrying on a *response-header timeout* carries a small duplicate-generation risk. For streaming requests, failures before the first chunk reach the client are retried; failures after commit terminate the stream instead of returning 502.

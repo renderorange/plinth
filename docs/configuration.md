@@ -147,7 +147,14 @@ The gpu-exporter supports one environment variable:
 
 ## Config Reload
 
-Config changes require a gateway restart. SIGHUP is not supported.
+Send `SIGHUP` to reload the config file without restarting the gateway:
+
+- The whole config is re-read, validated, and swapped atomically. In-flight requests finish against the previous config; new requests use the new one immediately.
+- If the new config fails to parse or validate, the gateway keeps serving the current config and logs the error. Retry once the file is fixed.
+- Nodes present in both configs keep their health status and failure counts. Newly added nodes, and existing nodes whose IP changed, start healthy.
+- Removed nodes stop receiving health checks; requests already routed to them complete normally.
+- Changes to `gateway.listen` or `gateway.metrics_listen` are ignored with a warning — listeners bind at startup, so address changes require a restart.
+- A SIGHUP received while a reload is in progress is ignored.
 
 ## Validation
 
