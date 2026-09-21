@@ -210,9 +210,9 @@ func reloadConfig(ctx context.Context, handler *api.Handler, configPath string) 
 
 func warnListenChanges(oldCfg, newCfg *config.Config) {
 	if oldCfg.Gateway.Listen != newCfg.Gateway.Listen {
-		log.Info("gateway.listen changed; requires restart", "old", oldCfg.Gateway.Listen, "new", newCfg.Gateway.Listen)
+		log.Warn("gateway.listen changed; requires restart", "old", oldCfg.Gateway.Listen, "new", newCfg.Gateway.Listen)
 	}
 	if oldCfg.Gateway.MetricsListen != newCfg.Gateway.MetricsListen {
-		log.Info("gateway.metrics_listen changed; requires restart", "old", oldCfg.Gateway.MetricsListen, "new", newCfg.Gateway.MetricsListen)
+		log.Warn("gateway.metrics_listen changed; requires restart", "old", oldCfg.Gateway.MetricsListen, "new", newCfg.Gateway.MetricsListen)
 	}
 }

@@ -23,6 +23,7 @@ type Monitor struct {
 	mu       sync.RWMutex
 	stop     chan struct{}
 	done     chan struct{}
+	stopOnce sync.Once
 }
 
 func NewMonitor(cfg *config.Config) *Monitor {
@@ -70,9 +71,14 @@ func (m *Monitor) Start() {
 	go m.loop()
 }
 
+// Stop halts the health-check loop and waits for it to exit. It is safe to
+// call multiple times, including concurrently: the monitor is torn down
+// exactly once.
 func (m *Monitor) Stop() {
-	close(m.stop)
-	<-m.done
+	m.stopOnce.Do(func() {
+		close(m.stop)
+		<-m.done
+	})
 }
 
 func (m *Monitor) GetNodeStates() []NodeState {

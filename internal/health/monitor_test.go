@@ -979,3 +979,16 @@ func TestStopDoesNotStartNewRound(t *testing.T) {
 		}
 	}
 }
+
+func TestStopIsIdempotent(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "test-node"},
+		},
+	}
+	mon := NewMonitor(cfg)
+	mon.Start()
+	mon.Stop()
+	mon.Stop()
+}

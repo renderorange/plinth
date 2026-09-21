@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -157,7 +159,6 @@ func TestModelsDuringConcurrentSwaps(t *testing.T) {
 		}
 	}()
 
-	seen := map[string]bool{}
 	for i := 0; i < 100; i++ {
 		req := httptest.NewRequest("GET", "/v1/models", nil)
 		w := httptest.NewRecorder()
@@ -176,16 +177,101 @@ func TestModelsDuringConcurrentSwaps(t *testing.T) {
 		if len(resp.Data) != 1 {
 			t.Fatalf("request %d data = %+v, want exactly 1 model (no torn reads)", i, resp.Data)
 		}
-		id := resp.Data[0].ID
-		if id != "model-a" && id != "model-b" {
+		if id := resp.Data[0].ID; id != "model-a" && id != "model-b" {
 			t.Fatalf("request %d id = %q, want model-a or model-b", i, id)
 		}
-		seen[id] = true
 	}
 	close(stop)
 	wg.Wait()
+}
 
-	if !seen["model-a"] || !seen["model-b"] {
-		t.Errorf("seen = %v, want responses from both snapshots", seen)
+// gatedBody blocks its first Read until released, and signals when that Read
+// is reached. It pins a request inside proxyToVLLM after the snapshot load
+// (handler.go reads the body only after loading the per-request snapshot).
+type gatedBody struct {
+	reached     chan struct{}
+	release     chan struct{}
+	reachedOnce sync.Once
+	releaseOnce sync.Once
+	data        []byte
+	off         int
+}
+
+func (b *gatedBody) Read(p []byte) (int, error) {
+	b.reachedOnce.Do(func() { close(b.reached) })
+	<-b.release
+	if b.off >= len(b.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.data[b.off:])
+	b.off += n
+	return n, nil
+}
+
+func (b *gatedBody) Close() error { return nil }
+
+func (b *gatedBody) Release() {
+	b.releaseOnce.Do(func() { close(b.release) })
+}
+
+// TestRequestKeepsSingleSnapshotAcrossReload pins a completion request after
+// proxyToVLLM loads its per-request snapshot, swaps the config mid-request,
+// then releases the body. The request must finish entirely against the old
+// snapshot: under cfgA the model is standalone and routes to the local
+// backend, while a second snapshot load mid-request would apply cfgB's ring
+// rules and produce 503 (no node in ring-b is healthy per the old monitor).
+func TestRequestKeepsSingleSnapshotAcrossReload(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"cmpl-1","object":"text_completion","choices":[]}`)
+	}))
+	defer backend.Close()
+
+	port := extractPort(t, backend.URL)
+	cfgA := &config.Config{
+		Cluster: config.ClusterConfig{Name: "a"},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "node-1", VLLMPort: port, MetricsPort: port},
+		},
+		Models: config.ModelsConfig{
+			Available: []config.ModelConfig{{Name: "model-a"}},
+		},
+	}
+	cfgB := &config.Config{
+		Cluster: config.ClusterConfig{Name: "b"},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.2", Name: "node-2", Ring: "ring-b"},
+		},
+		Models: config.ModelsConfig{
+			Available: []config.ModelConfig{{Name: "model-a", Ring: "ring-b"}},
+		},
+	}
+	h := NewHandler(cfgA, health.NewMonitor(cfgA), balancer.New())
+
+	body := &gatedBody{
+		reached: make(chan struct{}),
+		release: make(chan struct{}),
+		data:    []byte(`{"model":"model-a"}`),
+	}
+	req := httptest.NewRequest("POST", "/v1/completions", body)
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(w, req)
+		close(done)
+	}()
+	t.Cleanup(func() { body.Release(); <-done })
+
+	<-body.reached
+	h.UpdateConfig(cfgB, health.NewMonitor(cfgB))
+	body.Release()
+	<-done
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (request must finish against the snapshot captured at entry)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "cmpl-1") {
+		t.Fatalf("body = %q, want the backend completion", w.Body.String())
 	}
 }

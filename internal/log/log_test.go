@@ -176,3 +176,23 @@ func TestConcurrentLogging(t *testing.T) {
 		t.Errorf("expected 50 unique goroutine values, got %d", len(goroutines))
 	}
 }
+
+func TestWarnProducesJSON(t *testing.T) {
+	out := captureOutput(func() {
+		Warn("listen changed; requires restart", "old", ":8000", "new", ":8001")
+	})
+
+	var m map[string]string
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("invalid JSON: %v\noutput: %s", err, out)
+	}
+	if m["level"] != "warn" {
+		t.Errorf("level = %q, want %q", m["level"], "warn")
+	}
+	if m["msg"] != "listen changed; requires restart" {
+		t.Errorf("msg = %q, want %q", m["msg"], "listen changed; requires restart")
+	}
+	if m["old"] != ":8000" || m["new"] != ":8001" {
+		t.Errorf("kvs = %q/%q, want :8000/:8001", m["old"], m["new"])
+	}
+}

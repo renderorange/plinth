@@ -153,8 +153,8 @@ Send `SIGHUP` to reload the config file without restarting the gateway:
 - If the new config fails to parse or validate, the gateway keeps serving the current config and logs the error. Retry once the file is fixed.
 - Nodes present in both configs keep their health status and failure counts. Newly added nodes, and existing nodes whose IP changed, start healthy.
 - Removed nodes stop receiving health checks; requests already routed to them complete normally.
-- Changes to `gateway.listen` or `gateway.metrics_listen` are ignored with a warning — listeners bind at startup, so address changes require a restart.
-- A SIGHUP received while a reload is in progress is ignored.
+- Changes to `gateway.listen` or `gateway.metrics_listen` are logged as warnings and left running on the old addresses — listeners bind at startup, so address changes require a restart.
+- A SIGHUP received while a reload is in progress is not processed concurrently: reloads always run sequentially, and each delivered SIGHUP triggers a fresh re-read and swap of the config file once the in-flight reload finishes.
 
 ## Validation
 
