@@ -46,6 +46,26 @@ func NewMonitor(cfg *config.Config) *Monitor {
 	}
 }
 
+// NewMonitorWithState builds a monitor like NewMonitor but seeds health state
+// for IPs present in both the new config and prev: Status and
+// ConsecutiveFailures carry over so a reload does not give flapping nodes a
+// clean slate. Nodes not present in prev start Healthy, matching startup
+// semantics.
+func NewMonitorWithState(cfg *config.Config, prev []NodeState) *Monitor {
+	m := NewMonitor(cfg)
+	prevByIP := make(map[string]NodeState, len(prev))
+	for _, p := range prev {
+		prevByIP[p.IP] = p
+	}
+	for ip, n := range m.nodes {
+		if old, ok := prevByIP[ip]; ok {
+			n.Status = old.Status
+			n.ConsecutiveFailures = old.ConsecutiveFailures
+		}
+	}
+	return m
+}
+
 func (m *Monitor) Start() {
 	go m.loop()
 }
