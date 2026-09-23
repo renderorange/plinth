@@ -102,6 +102,8 @@ func runProvision(configPath string, args []string) error {
 		registry.Add(&provision.VLLMProvisioner{})
 		registry.Add(&provision.UserProvisioner{})
 		registry.Add(provision.NewModelWeightsProvisioner(weightMgr, sshCfg, cfg.Models.Available))
+		registry.Add(provision.NewVLLMServiceProvisioner(cfg.Provision.ServiceFilesDir))
+		registry.Add(provision.NewGPUExporterServiceProvisioner(cfg.Provision.GPUExporterBin, cfg.Provision.ServiceFilesDir))
 
 		if err := registry.RunAll(ctx, node, sshClient); err != nil {
 			sshClient.Close()

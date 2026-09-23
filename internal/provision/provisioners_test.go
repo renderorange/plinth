@@ -14,6 +14,8 @@ func TestProvisionerNames(t *testing.T) {
 		{&VLLMProvisioner{}, "vllm"},
 		{&UserProvisioner{}, "user"},
 		{&ModelWeightsProvisioner{}, "models"},
+		{&VLLMServiceProvisioner{}, "vllm-service"},
+		{&GPUExporterServiceProvisioner{}, "gpu-exporter-service"},
 	}
 
 	for _, tt := range provisioners {

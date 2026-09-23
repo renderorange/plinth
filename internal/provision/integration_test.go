@@ -73,9 +73,11 @@ func TestFullProvisionPipeline(t *testing.T) {
 	registry.Add(&VLLMProvisioner{})
 	registry.Add(&UserProvisioner{})
 	registry.Add(&ModelWeightsProvisioner{})
+	registry.Add(&VLLMServiceProvisioner{})
+	registry.Add(&GPUExporterServiceProvisioner{})
 
-	if registry.Len() != 5 {
-		t.Errorf("registry.Len() = %d, want 5", registry.Len())
+	if registry.Len() != 7 {
+		t.Errorf("registry.Len() = %d, want 7", registry.Len())
 	}
 
 	names := make([]string, 0)
@@ -83,7 +85,7 @@ func TestFullProvisionPipeline(t *testing.T) {
 		names = append(names, p.Name())
 	}
 
-	expected := []string{"drivers", "python", "vllm", "user", "models"}
+	expected := []string{"drivers", "python", "vllm", "user", "models", "vllm-service", "gpu-exporter-service"}
 	if len(names) != len(expected) {
 		t.Errorf("provisioner count = %d, want %d", len(names), len(expected))
 	}
