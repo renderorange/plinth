@@ -3,6 +3,7 @@ package provision
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -105,6 +106,13 @@ func handleSSHConn(conn net.Conn, config *ssh.ServerConfig, recorder *commandRec
 					ssh.Unmarshal(req.Payload, &payload)
 					recorder.add(payload.Command)
 
+					var stdinDone sync.WaitGroup
+					stdinDone.Add(1)
+					go func() {
+						defer stdinDone.Done()
+						io.Copy(io.Discard, channel)
+					}()
+
 					output := "ok"
 					if strings.Contains(payload.Command, "systemctl is-active") {
 						output = "active"
@@ -113,6 +121,8 @@ func handleSSHConn(conn net.Conn, config *ssh.ServerConfig, recorder *commandRec
 					channel.Write([]byte(output + "\n"))
 					req.Reply(true, nil)
 					channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+					channel.CloseWrite()
+					stdinDone.Wait()
 					channel.Close()
 				} else {
 					req.Reply(false, nil)

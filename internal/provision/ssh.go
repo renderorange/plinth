@@ -144,3 +144,51 @@ func (c *SSHClient) Run(ctx context.Context, command string) (string, error) {
 func (c *SSHClient) Close() error {
 	return c.client.Close()
 }
+
+func (c *SSHClient) PutFile(ctx context.Context, content []byte, remotePath string, perm os.FileMode) error {
+	session, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("creating session: %w", err)
+	}
+	defer session.Close()
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("opening stdin pipe: %w", err)
+	}
+
+	cmd := fmt.Sprintf("cat > %s", remotePath)
+	if err := session.Start(cmd); err != nil {
+		return fmt.Errorf("starting command: %w", err)
+	}
+
+	if _, err := stdin.Write(content); err != nil {
+		return fmt.Errorf("writing content: %w", err)
+	}
+	if err := stdin.Close(); err != nil {
+		return fmt.Errorf("closing stdin: %w", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		session.Signal(ssh.SIGKILL)
+		<-done
+		return ctx.Err()
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("putting file: %w", err)
+		}
+	}
+
+	chmodCmd := fmt.Sprintf("chmod %04o %s", perm, remotePath)
+	if _, err := c.Run(ctx, chmodCmd); err != nil {
+		return fmt.Errorf("setting permissions: %w", err)
+	}
+
+	return nil
+}

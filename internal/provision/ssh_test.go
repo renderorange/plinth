@@ -153,6 +153,49 @@ func TestNewSSHClientRejectsWrongFingerprint(t *testing.T) {
 	}
 }
 
+func TestSSHClientPutFile(t *testing.T) {
+	addr, hostKey, cleanup, commands := startRecordingMockSSHServer(t)
+	defer cleanup()
+
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("splitting mock addr: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parsing mock port: %v", err)
+	}
+
+	client, err := NewSSHClient(host, SSHConfig{
+		KeyPath: writeClientKey(t),
+		User:    "test",
+		Port:    port,
+		HostKey: ssh.FingerprintSHA256(hostKey),
+	})
+	if err != nil {
+		t.Fatalf("NewSSHClient() = %v", err)
+	}
+	defer client.Close()
+
+	content := []byte("hello world\n")
+	err = client.PutFile(context.Background(), content, "/tmp/test.txt", 0644)
+	if err != nil {
+		t.Fatalf("PutFile() = %v, want nil", err)
+	}
+
+	cmds := commands()
+	found := false
+	for _, cmd := range cmds {
+		if strings.Contains(cmd, "cat > /tmp/test.txt") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("PutFile did not execute cat command; commands = %v", cmds)
+	}
+}
+
 func TestSSHConfigFrom(t *testing.T) {
 	cfg := config.ProvisionConfig{
 		SSHKeyPath: "/home/test/.ssh/id_ed25519",
