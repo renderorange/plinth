@@ -14,7 +14,7 @@ import (
 )
 
 func TestProvisionerCommandsUseNoninteractiveFrontend(t *testing.T) {
-	addr, hostKey, cleanup, commands := startRecordingMockSSHServer(t)
+	addr, hostKey, cleanup, commands, _ := startRecordingMockSSHServer(t)
 	defer cleanup()
 
 	host, portStr, err := net.SplitHostPort(addr)
@@ -112,7 +112,7 @@ func TestFullProvisionPipelineExecution(t *testing.T) {
 		t.Fatalf("writing fake binary: %v", err)
 	}
 
-	addr, hostKey, cleanup, commands := startRecordingMockSSHServer(t)
+	addr, hostKey, cleanup, commands, _ := startRecordingMockSSHServer(t)
 	defer cleanup()
 
 	host, portStr, err := net.SplitHostPort(addr)
@@ -160,9 +160,9 @@ func TestFullProvisionPipelineExecution(t *testing.T) {
 	}
 
 	serviceCmds := []string{
-		"cat > /etc/systemd/system/vllm.service",
+		"/etc/systemd/system/vllm.service.tmp",
 		"systemctl enable vllm",
-		"cat > /etc/systemd/system/gpu-exporter.service",
+		"/etc/systemd/system/gpu-exporter.service.tmp",
 		"systemctl enable gpu-exporter",
 	}
 	for _, want := range serviceCmds {

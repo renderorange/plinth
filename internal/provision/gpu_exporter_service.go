@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"plinth/internal/config"
 )
@@ -27,7 +26,6 @@ func (p *GPUExporterServiceProvisioner) Description() string {
 }
 
 func (p *GPUExporterServiceProvisioner) Provision(ctx context.Context, node config.NodeConfig, ssh *SSHClient) error {
-	// Create vram-exporter user
 	userCommands := []string{
 		"id -u vram-exporter &>/dev/null || useradd -r -s /bin/false vram-exporter",
 		"usermod -aG video vram-exporter",
@@ -38,7 +36,6 @@ func (p *GPUExporterServiceProvisioner) Provision(ctx context.Context, node conf
 		}
 	}
 
-	// Upload binary
 	binContent, err := os.ReadFile(p.gpuExporterBin)
 	if err != nil {
 		return fmt.Errorf("reading gpu-exporter binary: %w", err)
@@ -47,25 +44,9 @@ func (p *GPUExporterServiceProvisioner) Provision(ctx context.Context, node conf
 		return fmt.Errorf("uploading gpu-exporter binary: %w", err)
 	}
 
-	// Upload service file
-	serviceContent, err := os.ReadFile(filepath.Join(p.serviceFilesDir, "gpu-exporter.service"))
-	if err != nil {
-		return fmt.Errorf("reading gpu-exporter.service: %w", err)
-	}
-	if err := ssh.PutFile(ctx, serviceContent, "/etc/systemd/system/gpu-exporter.service", 0644); err != nil {
-		return fmt.Errorf("uploading gpu-exporter.service: %w", err)
+	if err := provisionSystemService(ctx, ssh, p.serviceFilesDir, "gpu-exporter"); err != nil {
+		return err
 	}
 
-	// Enable and start
-	commands := []string{
-		"systemctl daemon-reload",
-		"systemctl enable gpu-exporter",
-		"systemctl restart gpu-exporter",
-	}
-	for _, cmd := range commands {
-		if _, err := ssh.Run(ctx, cmd); err != nil {
-			return fmt.Errorf("gpu-exporter-service: %w", err)
-		}
-	}
 	return nil
 }

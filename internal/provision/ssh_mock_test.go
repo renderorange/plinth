@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"io"
@@ -13,14 +14,16 @@ import (
 )
 
 type commandRecorder struct {
-	mu   sync.Mutex
-	cmds []string
+	mu       sync.Mutex
+	cmds     []string
+	contents [][]byte
 }
 
-func (r *commandRecorder) add(cmd string) {
+func (r *commandRecorder) add(cmd string, content []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cmds = append(r.cmds, cmd)
+	r.contents = append(r.contents, content)
 }
 
 func (r *commandRecorder) list() []string {
@@ -29,12 +32,20 @@ func (r *commandRecorder) list() []string {
 	return append([]string(nil), r.cmds...)
 }
 
+func (r *commandRecorder) contentList() [][]byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([][]byte, len(r.contents))
+	copy(result, r.contents)
+	return result
+}
+
 func startMockSSHServer(t *testing.T) (addr string, hostKey ssh.PublicKey, cleanup func()) {
-	addr, hostKey, cleanup, _ = startRecordingMockSSHServer(t)
+	addr, hostKey, cleanup, _, _ = startRecordingMockSSHServer(t)
 	return addr, hostKey, cleanup
 }
 
-func startRecordingMockSSHServer(t *testing.T) (addr string, hostKey ssh.PublicKey, cleanup func(), commands func() []string) {
+func startRecordingMockSSHServer(t *testing.T) (addr string, hostKey ssh.PublicKey, cleanup func(), commands func() []string, contents func() [][]byte) {
 	t.Helper()
 
 	pubKey, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -74,7 +85,7 @@ func startRecordingMockSSHServer(t *testing.T) (addr string, hostKey ssh.PublicK
 		}
 	}()
 
-	return listener.Addr().String(), hostKey, func() { listener.Close() }, recorder.list
+	return listener.Addr().String(), hostKey, func() { listener.Close() }, recorder.list, recorder.contentList
 }
 
 func handleSSHConn(conn net.Conn, config *ssh.ServerConfig, recorder *commandRecorder) {
@@ -104,13 +115,13 @@ func handleSSHConn(conn net.Conn, config *ssh.ServerConfig, recorder *commandRec
 						Command string
 					}
 					ssh.Unmarshal(req.Payload, &payload)
-					recorder.add(payload.Command)
 
+					var buf bytes.Buffer
 					var stdinDone sync.WaitGroup
 					stdinDone.Add(1)
 					go func() {
 						defer stdinDone.Done()
-						io.Copy(io.Discard, channel)
+						io.Copy(&buf, channel)
 					}()
 
 					output := "ok"
@@ -123,6 +134,8 @@ func handleSSHConn(conn net.Conn, config *ssh.ServerConfig, recorder *commandRec
 					channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 					channel.CloseWrite()
 					stdinDone.Wait()
+
+					recorder.add(payload.Command, buf.Bytes())
 					channel.Close()
 				} else {
 					req.Reply(false, nil)

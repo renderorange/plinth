@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -25,11 +26,12 @@ func TestVLLMServiceProvisionerName(t *testing.T) {
 
 func TestVLLMServiceProvisionerProvision(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "vllm.service"), []byte("[Unit]\nDescription=test"), 0644); err != nil {
+	serviceContent := []byte("[Unit]\nDescription=test")
+	if err := os.WriteFile(filepath.Join(dir, "vllm.service"), serviceContent, 0644); err != nil {
 		t.Fatalf("writing service file: %v", err)
 	}
 
-	addr, hostKey, cleanup, commands := startRecordingMockSSHServer(t)
+	addr, hostKey, cleanup, commands, contents := startRecordingMockSSHServer(t)
 	defer cleanup()
 
 	host, portStr, _ := net.SplitHostPort(addr)
@@ -54,7 +56,7 @@ func TestVLLMServiceProvisionerProvision(t *testing.T) {
 
 	cmds := commands()
 	expected := []string{
-		"cat > /etc/systemd/system/vllm.service",
+		"/etc/systemd/system/vllm.service.tmp",
 		"systemctl daemon-reload",
 		"systemctl enable vllm",
 		"systemctl restart vllm",
@@ -70,6 +72,17 @@ func TestVLLMServiceProvisionerProvision(t *testing.T) {
 		if !found {
 			t.Errorf("expected command %q not found in %v", want, cmds)
 		}
+	}
+
+	fileContents := contents()
+	var foundContent bool
+	for _, c := range fileContents {
+		if bytes.Contains(c, serviceContent) {
+			foundContent = true
+		}
+	}
+	if !foundContent {
+		t.Errorf("service content %q not found in transferred data", serviceContent)
 	}
 }
 

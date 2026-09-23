@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"os"
@@ -25,18 +26,18 @@ func TestGPUExporterServiceProvisionerName(t *testing.T) {
 func TestGPUExporterServiceProvisionerProvision(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a fake binary
+	binContent := []byte("fake-binary")
 	binPath := filepath.Join(dir, "gpu-exporter")
-	if err := os.WriteFile(binPath, []byte("fake-binary"), 0755); err != nil {
+	if err := os.WriteFile(binPath, binContent, 0755); err != nil {
 		t.Fatalf("writing fake binary: %v", err)
 	}
 
-	// Create service file
-	if err := os.WriteFile(filepath.Join(dir, "gpu-exporter.service"), []byte("[Unit]\nDescription=test"), 0644); err != nil {
+	serviceContent := []byte("[Unit]\nDescription=test")
+	if err := os.WriteFile(filepath.Join(dir, "gpu-exporter.service"), serviceContent, 0644); err != nil {
 		t.Fatalf("writing service file: %v", err)
 	}
 
-	addr, hostKey, cleanup, commands := startRecordingMockSSHServer(t)
+	addr, hostKey, cleanup, commands, contents := startRecordingMockSSHServer(t)
 	defer cleanup()
 
 	host, portStr, _ := net.SplitHostPort(addr)
@@ -63,8 +64,8 @@ func TestGPUExporterServiceProvisionerProvision(t *testing.T) {
 	expected := []string{
 		"id -u vram-exporter",
 		"usermod -aG video vram-exporter",
-		"cat > /usr/local/bin/gpu-exporter",
-		"cat > /etc/systemd/system/gpu-exporter.service",
+		"/usr/local/bin/gpu-exporter.tmp",
+		"/etc/systemd/system/gpu-exporter.service.tmp",
 		"systemctl daemon-reload",
 		"systemctl enable gpu-exporter",
 		"systemctl restart gpu-exporter",
@@ -80,6 +81,23 @@ func TestGPUExporterServiceProvisionerProvision(t *testing.T) {
 		if !found {
 			t.Errorf("expected command %q not found in %v", want, cmds)
 		}
+	}
+
+	fileContents := contents()
+	var foundBinContent, foundServiceContent bool
+	for _, c := range fileContents {
+		if bytes.Contains(c, binContent) {
+			foundBinContent = true
+		}
+		if bytes.Contains(c, serviceContent) {
+			foundServiceContent = true
+		}
+	}
+	if !foundBinContent {
+		t.Errorf("binary content %q not found in transferred data", binContent)
+	}
+	if !foundServiceContent {
+		t.Errorf("service content %q not found in transferred data", serviceContent)
 	}
 }
 

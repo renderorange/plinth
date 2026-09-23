@@ -154,7 +154,7 @@ func TestNewSSHClientRejectsWrongFingerprint(t *testing.T) {
 }
 
 func TestSSHClientPutFile(t *testing.T) {
-	addr, hostKey, cleanup, commands := startRecordingMockSSHServer(t)
+	addr, hostKey, cleanup, commands, contents := startRecordingMockSSHServer(t)
 	defer cleanup()
 
 	host, portStr, err := net.SplitHostPort(addr)
@@ -184,13 +184,16 @@ func TestSSHClientPutFile(t *testing.T) {
 	}
 
 	cmds := commands()
-	var foundCat, foundChmod bool
+	var foundCat, foundChmod, foundMv bool
 	for _, cmd := range cmds {
-		if strings.Contains(cmd, "cat > /tmp/test.txt") {
+		if strings.Contains(cmd, "cat >") && strings.Contains(cmd, "/tmp/test.txt.tmp") {
 			foundCat = true
 		}
-		if strings.Contains(cmd, "chmod 0644 /tmp/test.txt") {
+		if strings.Contains(cmd, "chmod 0644") && strings.Contains(cmd, "/tmp/test.txt.tmp") {
 			foundChmod = true
+		}
+		if strings.Contains(cmd, "mv") && strings.Contains(cmd, "/tmp/test.txt.tmp") && strings.Contains(cmd, "/tmp/test.txt") {
+			foundMv = true
 		}
 	}
 	if !foundCat {
@@ -198,6 +201,58 @@ func TestSSHClientPutFile(t *testing.T) {
 	}
 	if !foundChmod {
 		t.Errorf("PutFile did not execute chmod command; commands = %v", cmds)
+	}
+	if !foundMv {
+		t.Errorf("PutFile did not execute mv command; commands = %v", cmds)
+	}
+
+	fileContents := contents()
+	var foundContent bool
+	for _, c := range fileContents {
+		if string(c) == string(content) {
+			foundContent = true
+		}
+	}
+	if !foundContent {
+		t.Errorf("PutFile did not transfer content; got %v", fileContents)
+	}
+}
+
+func TestSSHClientPutFileEmptyContent(t *testing.T) {
+	addr, hostKey, cleanup, _, fileContents := startRecordingMockSSHServer(t)
+	defer cleanup()
+
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("splitting mock addr: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parsing mock port: %v", err)
+	}
+
+	client, err := NewSSHClient(host, SSHConfig{
+		KeyPath: writeClientKey(t),
+		User:    "test",
+		Port:    port,
+		HostKey: ssh.FingerprintSHA256(hostKey),
+	})
+	if err != nil {
+		t.Fatalf("NewSSHClient() = %v", err)
+	}
+	defer client.Close()
+
+	err = client.PutFile(context.Background(), []byte{}, "/tmp/empty.txt", 0644)
+	if err != nil {
+		t.Fatalf("PutFile() with empty content = %v, want nil", err)
+	}
+
+	contents := fileContents()
+	if len(contents) != 1 {
+		t.Fatalf("expected 1 transferred file, got %d", len(contents))
+	}
+	if len(contents[0]) != 0 {
+		t.Errorf("expected empty content, got %d bytes", len(contents[0]))
 	}
 }
 

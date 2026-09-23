@@ -98,6 +98,8 @@ func (c *Config) Validate() error {
 	if c.Provision.ServiceFilesDir == "" {
 		c.Provision.ServiceFilesDir = defaultServiceFilesDir
 	}
+	c.Provision.GPUExporterBin = expandHome(c.Provision.GPUExporterBin)
+	c.Provision.ServiceFilesDir = expandHome(c.Provision.ServiceFilesDir)
 
 	ringMembers := make(map[string]bool)
 	hasStandaloneNode := false

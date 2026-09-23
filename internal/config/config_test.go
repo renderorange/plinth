@@ -307,8 +307,10 @@ func TestProvisionDefaultPathsExpandTilde(t *testing.T) {
 			{IP: "10.0.0.1", Name: "node-1"},
 		},
 		Provision: ProvisionConfig{
-			WeightsDir: "~/weights",
-			SSHKeyPath: "//home/custom/key",
+			WeightsDir:      "~/weights",
+			SSHKeyPath:      "//home/custom/key",
+			GPUExporterBin:  "~/bin/gpu-exporter",
+			ServiceFilesDir: "~/plinth/scripts",
 		},
 	}
 	if err := cfg2.Validate(); err != nil {
@@ -319,6 +321,12 @@ func TestProvisionDefaultPathsExpandTilde(t *testing.T) {
 	}
 	if cfg2.Provision.SSHKeyPath != "//home/custom/key" {
 		t.Errorf("SSHKeyPath = %q, want unchanged absolute path", cfg2.Provision.SSHKeyPath)
+	}
+	if cfg2.Provision.GPUExporterBin != filepath.Join(home, "bin", "gpu-exporter") {
+		t.Errorf("GPUExporterBin = %q, want %q", cfg2.Provision.GPUExporterBin, filepath.Join(home, "bin", "gpu-exporter"))
+	}
+	if cfg2.Provision.ServiceFilesDir != filepath.Join(home, "plinth", "scripts") {
+		t.Errorf("ServiceFilesDir = %q, want %q", cfg2.Provision.ServiceFilesDir, filepath.Join(home, "plinth", "scripts"))
 	}
 }
 

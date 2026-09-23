@@ -145,6 +145,11 @@ func (c *SSHClient) Close() error {
 	return c.client.Close()
 }
 
+// PutFile atomically writes content to a remote file over SSH. It writes to a
+// temporary file (.tmp suffix), sets permissions, then renames into place. This
+// ensures the remote file is never in a partially-written state if the command
+// succeeds. If the SSH connection drops mid-transfer, the .tmp file may be left
+// behind but the original file is untouched.
 func (c *SSHClient) PutFile(ctx context.Context, content []byte, remotePath string, perm os.FileMode) error {
 	session, err := c.client.NewSession()
 	if err != nil {
@@ -157,7 +162,10 @@ func (c *SSHClient) PutFile(ctx context.Context, content []byte, remotePath stri
 		return fmt.Errorf("opening stdin pipe: %w", err)
 	}
 
-	cmd := fmt.Sprintf("cat > %s", remotePath)
+	tmpPath := remotePath + ".tmp"
+	cmd := fmt.Sprintf("cat > '%s' && chmod %04o '%s' && mv '%s' '%s'",
+		shellEscapeSingleQuote(tmpPath), perm, shellEscapeSingleQuote(tmpPath),
+		shellEscapeSingleQuote(tmpPath), shellEscapeSingleQuote(remotePath))
 	if err := session.Start(cmd); err != nil {
 		return fmt.Errorf("starting command: %w", err)
 	}
@@ -185,10 +193,9 @@ func (c *SSHClient) PutFile(ctx context.Context, content []byte, remotePath stri
 		}
 	}
 
-	chmodCmd := fmt.Sprintf("chmod %04o %s", perm, remotePath)
-	if _, err := c.Run(ctx, chmodCmd); err != nil {
-		return fmt.Errorf("setting permissions: %w", err)
-	}
-
 	return nil
+}
+
+func shellEscapeSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
 }
