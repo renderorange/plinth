@@ -17,6 +17,8 @@ const (
 	defaultMetricsPort    = 9100
 	defaultWeightsDir     = "/var/lib/plinth/weights"
 	defaultSSHKeyPath     = "~/.ssh/id_rsa"
+	defaultGPUExporterBin = "./gpu-exporter"
+	defaultServiceFilesDir = "./scripts"
 )
 
 type rawConfig struct {

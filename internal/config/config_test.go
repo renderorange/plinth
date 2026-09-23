@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -359,6 +360,66 @@ func TestValidateDuplicateNodeIPs(t *testing.T) {
 		t.Error("expected error for duplicate node IPs, got nil")
 	} else if !strings.Contains(err.Error(), "duplicate node IP") {
 		t.Errorf("error = %q, want message containing %q", err.Error(), "duplicate node IP")
+	}
+}
+
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
+	tmp, err := os.CreateTemp("", "gateway-*.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(tmp.Name()) })
+	if _, err := tmp.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	tmp.Close()
+	return tmp.Name()
+}
+
+func TestProvisionConfigServiceDefaults(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+[gateway]
+listen = ":0"
+metrics_listen = ":0"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "n1"
+`))
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	if cfg.Provision.GPUExporterBin != "./gpu-exporter" {
+		t.Errorf("GPUExporterBin = %q, want %q", cfg.Provision.GPUExporterBin, "./gpu-exporter")
+	}
+	if cfg.Provision.ServiceFilesDir != "./scripts" {
+		t.Errorf("ServiceFilesDir = %q, want %q", cfg.Provision.ServiceFilesDir, "./scripts")
+	}
+}
+
+func TestProvisionConfigServiceExplicit(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+[gateway]
+listen = ":0"
+metrics_listen = ":0"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "n1"
+
+[provision]
+gpu_exporter_bin = "/usr/local/bin/gpu-exporter"
+service_files_dir = "/opt/plinth/scripts"
+`))
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	if cfg.Provision.GPUExporterBin != "/usr/local/bin/gpu-exporter" {
+		t.Errorf("GPUExporterBin = %q, want %q", cfg.Provision.GPUExporterBin, "/usr/local/bin/gpu-exporter")
+	}
+	if cfg.Provision.ServiceFilesDir != "/opt/plinth/scripts" {
+		t.Errorf("ServiceFilesDir = %q, want %q", cfg.Provision.ServiceFilesDir, "/opt/plinth/scripts")
 	}
 }
 

@@ -47,11 +47,13 @@ type ModelConfig struct {
 }
 
 type ProvisionConfig struct {
-	WeightsDir string `toml:"weights_dir"`
-	SSHKeyPath string `toml:"ssh_key"`
-	SSHUser    string `toml:"ssh_user"`
-	SSHPort    int    `toml:"ssh_port"`
-	SSHHostKey string `toml:"ssh_host_key"`
+	WeightsDir      string `toml:"weights_dir"`
+	SSHKeyPath      string `toml:"ssh_key"`
+	SSHUser         string `toml:"ssh_user"`
+	SSHPort         int    `toml:"ssh_port"`
+	SSHHostKey      string `toml:"ssh_host_key"`
+	GPUExporterBin  string `toml:"gpu_exporter_bin"`
+	ServiceFilesDir string `toml:"service_files_dir"`
 }
 
 func (c *Config) Validate() error {
@@ -90,6 +92,12 @@ func (c *Config) Validate() error {
 	}
 	c.Provision.WeightsDir = expandHome(c.Provision.WeightsDir)
 	c.Provision.SSHKeyPath = expandHome(c.Provision.SSHKeyPath)
+	if c.Provision.GPUExporterBin == "" {
+		c.Provision.GPUExporterBin = defaultGPUExporterBin
+	}
+	if c.Provision.ServiceFilesDir == "" {
+		c.Provision.ServiceFilesDir = defaultServiceFilesDir
+	}
 
 	ringMembers := make(map[string]bool)
 	hasStandaloneNode := false
