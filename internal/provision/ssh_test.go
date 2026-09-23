@@ -184,15 +184,20 @@ func TestSSHClientPutFile(t *testing.T) {
 	}
 
 	cmds := commands()
-	found := false
+	var foundCat, foundChmod bool
 	for _, cmd := range cmds {
 		if strings.Contains(cmd, "cat > /tmp/test.txt") {
-			found = true
-			break
+			foundCat = true
+		}
+		if strings.Contains(cmd, "chmod 0644 /tmp/test.txt") {
+			foundChmod = true
 		}
 	}
-	if !found {
+	if !foundCat {
 		t.Errorf("PutFile did not execute cat command; commands = %v", cmds)
+	}
+	if !foundChmod {
+		t.Errorf("PutFile did not execute chmod command; commands = %v", cmds)
 	}
 }
 

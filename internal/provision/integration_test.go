@@ -3,6 +3,8 @@ package provision
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -97,26 +99,39 @@ func TestFullProvisionPipeline(t *testing.T) {
 }
 
 func TestFullProvisionPipelineExecution(t *testing.T) {
-	addr, _, cleanup := startMockSSHServer(t)
+	tmpDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "vllm.service"), []byte("[Unit]\nDescription=test"), 0644); err != nil {
+		t.Fatalf("writing vllm.service: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "gpu-exporter.service"), []byte("[Unit]\nDescription=test"), 0644); err != nil {
+		t.Fatalf("writing gpu-exporter.service: %v", err)
+	}
+	binPath := filepath.Join(tmpDir, "gpu-exporter")
+	if err := os.WriteFile(binPath, []byte("fake-binary"), 0755); err != nil {
+		t.Fatalf("writing fake binary: %v", err)
+	}
+
+	addr, hostKey, cleanup, commands := startRecordingMockSSHServer(t)
 	defer cleanup()
 
-	host, _, _ := net.SplitHostPort(addr)
-
-	netConn, err := net.Dial("tcp", addr)
+	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		t.Fatalf("splitting mock addr: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parsing mock port: %v", err)
 	}
 
-	sshConn, chans, reqs, err := ssh.NewClientConn(netConn, addr, &ssh.ClientConfig{
-		User:            "test",
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	client, err := NewSSHClient(host, SSHConfig{
+		KeyPath: writeClientKey(t),
+		User:    "test",
+		Port:    port,
+		HostKey: ssh.FingerprintSHA256(hostKey),
 	})
 	if err != nil {
-		t.Fatalf("ssh connect: %v", err)
-	}
-	client := &SSHClient{
-		client: ssh.NewClient(sshConn, chans, reqs),
-		config: SSHConfig{User: "test"},
+		t.Fatalf("connecting to mock server: %v", err)
 	}
 	defer client.Close()
 
@@ -125,6 +140,8 @@ func TestFullProvisionPipelineExecution(t *testing.T) {
 	registry.Add(&PythonProvisioner{})
 	registry.Add(&VLLMProvisioner{})
 	registry.Add(&UserProvisioner{})
+	registry.Add(NewVLLMServiceProvisioner(tmpDir))
+	registry.Add(NewGPUExporterServiceProvisioner(binPath, tmpDir))
 
 	node := config.NodeConfig{
 		Name: "test-node",
@@ -135,6 +152,30 @@ func TestFullProvisionPipelineExecution(t *testing.T) {
 	err = registry.RunAll(ctx, node, client)
 	if err != nil {
 		t.Errorf("RunAll() error = %v, want nil", err)
+	}
+
+	cmds := commands()
+	if len(cmds) == 0 {
+		t.Error("no commands recorded; expected provisioner commands")
+	}
+
+	serviceCmds := []string{
+		"cat > /etc/systemd/system/vllm.service",
+		"systemctl enable vllm",
+		"cat > /etc/systemd/system/gpu-exporter.service",
+		"systemctl enable gpu-exporter",
+	}
+	for _, want := range serviceCmds {
+		found := false
+		for _, cmd := range cmds {
+			if strings.Contains(cmd, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected service command %q not found in %v", want, cmds)
+		}
 	}
 }
 
