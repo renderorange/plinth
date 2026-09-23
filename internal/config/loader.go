@@ -9,15 +9,15 @@ import (
 )
 
 const (
-	defaultListen         = ":8000"
-	defaultMetricsListen  = ":9090"
-	defaultHealthInterval = 3 * time.Second
-	defaultFailThreshold  = 3
-	defaultVLLMPort       = 8000
-	defaultMetricsPort    = 9100
-	defaultWeightsDir     = "/var/lib/plinth/weights"
-	defaultSSHKeyPath     = "~/.ssh/id_rsa"
-	defaultGPUExporterBin = "./gpu-exporter"
+	defaultListen          = ":8000"
+	defaultMetricsListen   = ":9090"
+	defaultHealthInterval  = 3 * time.Second
+	defaultFailThreshold   = 3
+	defaultVLLMPort        = 8000
+	defaultMetricsPort     = 9100
+	defaultWeightsDir      = "/var/lib/plinth/weights"
+	defaultSSHKeyPath      = "~/.ssh/id_rsa"
+	defaultGPUExporterBin  = "./gpu-exporter"
 	defaultServiceFilesDir = "./scripts"
 )
 

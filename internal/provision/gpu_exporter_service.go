@@ -21,8 +21,10 @@ func NewGPUExporterServiceProvisioner(gpuExporterBin string, serviceFilesDir str
 	}
 }
 
-func (p *GPUExporterServiceProvisioner) Name() string        { return "gpu-exporter-service" }
-func (p *GPUExporterServiceProvisioner) Description() string { return "Install gpu-exporter binary, create user, enable service" }
+func (p *GPUExporterServiceProvisioner) Name() string { return "gpu-exporter-service" }
+func (p *GPUExporterServiceProvisioner) Description() string {
+	return "Install gpu-exporter binary, create user, enable service"
+}
 
 func (p *GPUExporterServiceProvisioner) Provision(ctx context.Context, node config.NodeConfig, ssh *SSHClient) error {
 	// Create vram-exporter user
