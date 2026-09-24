@@ -48,3 +48,5 @@ ssh_key = "~/.ssh/id_rsa"
 # ssh_user = "root"
 # ssh_port = 22
 # ssh_host_key = "SHA256:..." # required for provision/weights push; value from: ssh-keyscan -t ed25519 <node-ip>
+# gpu_exporter_bin = "./gpu-exporter"       # local path to gpu-exporter binary
+# service_files_dir = "./scripts"            # directory containing .service files

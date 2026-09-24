@@ -144,3 +144,58 @@ func (c *SSHClient) Run(ctx context.Context, command string) (string, error) {
 func (c *SSHClient) Close() error {
 	return c.client.Close()
 }
+
+// PutFile atomically writes content to a remote file over SSH. It writes to a
+// temporary file (.tmp suffix), sets permissions, then renames into place. This
+// ensures the remote file is never in a partially-written state if the command
+// succeeds. If the SSH connection drops mid-transfer, the .tmp file may be left
+// behind but the original file is untouched.
+func (c *SSHClient) PutFile(ctx context.Context, content []byte, remotePath string, perm os.FileMode) error {
+	session, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("creating session: %w", err)
+	}
+	defer session.Close()
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("opening stdin pipe: %w", err)
+	}
+
+	tmpPath := remotePath + ".tmp"
+	cmd := fmt.Sprintf("cat > '%s' && chmod %04o '%s' && mv '%s' '%s'",
+		shellEscapeSingleQuote(tmpPath), perm, shellEscapeSingleQuote(tmpPath),
+		shellEscapeSingleQuote(tmpPath), shellEscapeSingleQuote(remotePath))
+	if err := session.Start(cmd); err != nil {
+		return fmt.Errorf("starting command: %w", err)
+	}
+
+	if _, err := stdin.Write(content); err != nil {
+		return fmt.Errorf("writing content: %w", err)
+	}
+	if err := stdin.Close(); err != nil {
+		return fmt.Errorf("closing stdin: %w", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		session.Signal(ssh.SIGKILL)
+		<-done
+		return ctx.Err()
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("putting file: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func shellEscapeSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
+}
