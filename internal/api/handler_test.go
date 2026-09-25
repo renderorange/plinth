@@ -1336,6 +1336,10 @@ func TestProxyToVLLMOverflowPassesThrough(t *testing.T) {
 	defer mon.Stop()
 	waitForHealthy(t, mon)
 
+	var beforeSL, beforeCL dto.Metric
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "size_limit").Write(&beforeSL)
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "content_length").Write(&beforeCL)
+
 	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1350,6 +1354,16 @@ func TestProxyToVLLMOverflowPassesThrough(t *testing.T) {
 	}
 	if h.offline.skip("127.0.0.1") {
 		t.Error("overflow marked node offline; overflow is not a node failure")
+	}
+
+	var afterSL, afterCL dto.Metric
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "size_limit").Write(&afterSL)
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "content_length").Write(&afterCL)
+	if got := afterSL.GetCounter().GetValue() - beforeSL.GetCounter().GetValue(); got != 1 {
+		t.Errorf("ResponsePassthroughTotal{size_limit} delta = %v, want 1 (this test must overflow the buffer, not take the Content-Length fast-path)", got)
+	}
+	if got := afterCL.GetCounter().GetValue() - beforeCL.GetCounter().GetValue(); got != 0 {
+		t.Errorf("ResponsePassthroughTotal{content_length} delta = %v, want 0", got)
 	}
 }
 
@@ -1402,6 +1416,87 @@ func TestProxyToVLLMTruncatedAfterCommitDoesNotWrite502(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "upstream node error") {
 		t.Errorf("body contains fallback error text after commit: %q", w.Body.String())
+	}
+}
+
+// TestProxyToVLLMSizeLimitOverflowThenTruncateDoesNotWrite502 covers the
+// combination the Content-Length fast-path cannot: the buffer overflows
+// (size_limit, not content_length) and the upstream then dies mid-body. The
+// response is chunk-framed and never terminated, so the read fails with
+// io.ErrUnexpectedEOF rather than the clean EOF a close-delimited body would
+// give. Once the overflow prefix is committed the attempt must not be retried
+// and must never be replaced with a 502.
+func TestProxyToVLLMSizeLimitOverflowThenTruncateDoesNotWrite502(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				req, err := http.ReadRequest(br)
+				if err != nil {
+					return
+				}
+				io.Copy(io.Discard, req.Body)
+				req.Body.Close()
+				io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+				io.WriteString(c, "5\r\nabcde\r\n")
+				io.WriteString(c, "14\r\n"+strings.Repeat("y", 20)+"\r\n")
+				// Deliberately omit the terminating 0\r\n\r\n chunk: the body
+				// ends in io.ErrUnexpectedEOF, which is a truncation, not EOF.
+			}(conn)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	h, mon := newTestHandlerWithPortLimit(port, 10)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	var beforeSL, beforeCL dto.Metric
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "size_limit").Write(&beforeSL)
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "content_length").Write(&beforeCL)
+
+	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Body.Len() == 0 {
+		t.Fatal("client body empty; the overflow prefix must have been committed before the truncation")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (already committed; never 502 after commit)", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "upstream node error") {
+		t.Errorf("body contains fallback error text after commit: %q", w.Body.String())
+	}
+	if h.offline.skip("127.0.0.1") {
+		t.Error("post-commit truncation marked node offline")
+	}
+	wantBody := "abcde" + strings.Repeat("y", 20)
+	if w.Body.String() != wantBody {
+		t.Errorf("client body = %q (len %d), want %q (len %d)", w.Body.String(), w.Body.Len(), wantBody, len(wantBody))
+	}
+
+	var afterSL, afterCL dto.Metric
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "size_limit").Write(&afterSL)
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "content_length").Write(&afterCL)
+	if got := afterSL.GetCounter().GetValue() - beforeSL.GetCounter().GetValue(); got != 1 {
+		t.Errorf("ResponsePassthroughTotal{size_limit} delta = %v, want 1", got)
+	}
+	if got := afterCL.GetCounter().GetValue() - beforeCL.GetCounter().GetValue(); got != 0 {
+		t.Errorf("ResponsePassthroughTotal{content_length} delta = %v, want 0 (chunk-framed body must not take the Content-Length fast-path)", got)
 	}
 }
 
