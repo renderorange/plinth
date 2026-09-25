@@ -126,10 +126,18 @@ func TestCompletionsInvalidJSON(t *testing.T) {
 }
 
 func TestChatCompletionsBodyTooLarge(t *testing.T) {
-	h := newTestHandler()
-	old := maxBodyBytes
-	maxBodyBytes = 16
-	defer func() { maxBodyBytes = old }()
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Gateway: config.GatewayConfig{MaxRequestBodyBytes: 16},
+		Nodes:   []config.NodeConfig{},
+		Models: config.ModelsConfig{
+			Default: "test/model",
+			Available: []config.ModelConfig{
+				{Name: "test/model", PipelineStages: 1},
+			},
+		},
+	}
+	h := NewHandler(cfg, health.NewMonitor(cfg), balancer.New())
 
 	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
@@ -139,6 +147,33 @@ func TestChatCompletionsBodyTooLarge(t *testing.T) {
 
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status = %d, want %d (body too large)", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+// TestChatCompletionsBodyWithinConfiguredLimit confirms the request body cap is
+// read from config rather than a hardcoded package default.
+func TestChatCompletionsBodyWithinConfiguredLimit(t *testing.T) {
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Gateway: config.GatewayConfig{MaxRequestBodyBytes: 1 << 20},
+		Nodes:   []config.NodeConfig{},
+		Models: config.ModelsConfig{
+			Default: "test/model",
+			Available: []config.ModelConfig{
+				{Name: "test/model", PipelineStages: 1},
+			},
+		},
+	}
+	h := NewHandler(cfg, health.NewMonitor(cfg), balancer.New())
+
+	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code == http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want not 413: body is well under the configured limit", w.Code)
 	}
 }
 

@@ -116,6 +116,7 @@ See [config/gateway.toml.example](config/gateway.toml.example) for a complete ex
 | `[gateway]` | `health_interval` | Health check interval | `3s` |
 | `[gateway]` | `health_fail_threshold` | Failures before marking dead | `3` |
 | `[gateway]` | `max_buffered_response_bytes` | Max buffered non-streaming response bytes | `8388608` |
+| `[gateway]` | `max_request_body_bytes` | Max accepted request body bytes | `33554432` |
 | `[[nodes]]` | `ip` | Node IP address | — |
 | `[[nodes]]` | `name` | Node display name | — |
 | `[[nodes]]` | `vllm_port` | vLLM API port | `8000` |

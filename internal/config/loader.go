@@ -21,6 +21,7 @@ const (
 	defaultServiceFilesDir = "./scripts"
 
 	defaultMaxBufferedResponseBytes int64 = 8 << 20
+	defaultMaxRequestBodyBytes      int64 = 32 << 20
 )
 
 type rawConfig struct {
@@ -37,6 +38,7 @@ type rawGatewayConfig struct {
 	HealthInterval           string `toml:"health_interval"`
 	HealthFailThreshold      int    `toml:"health_fail_threshold"`
 	MaxBufferedResponseBytes int64  `toml:"max_buffered_response_bytes"`
+	MaxRequestBodyBytes      int64  `toml:"max_request_body_bytes"`
 }
 
 func Load(path string) (*Config, error) {
@@ -57,6 +59,7 @@ func Load(path string) (*Config, error) {
 			MetricsListen:            raw.Gateway.MetricsListen,
 			HealthFailThreshold:      raw.Gateway.HealthFailThreshold,
 			MaxBufferedResponseBytes: raw.Gateway.MaxBufferedResponseBytes,
+			MaxRequestBodyBytes:      raw.Gateway.MaxRequestBodyBytes,
 		},
 		Nodes:     raw.Nodes,
 		Models:    raw.Models,

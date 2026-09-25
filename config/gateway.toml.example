@@ -7,6 +7,7 @@ metrics_listen = ":9090"
 health_interval = "3s"
 health_fail_threshold = 3
 # max_buffered_response_bytes = 8388608  # 8 MiB; -1 = unlimited
+# max_request_body_bytes = 33554432      # 32 MiB; no unlimited setting
 
 # Standalone nodes — each independently serves non-ring models (round-robin)
 [[nodes]]

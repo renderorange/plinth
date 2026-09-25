@@ -513,3 +513,49 @@ func TestResponseBufferLimitWithoutValidate(t *testing.T) {
 		t.Errorf("zero-value ResponseBufferLimit() = %d, want %d", got, 8<<20)
 	}
 }
+
+func TestValidateDefaultMaxRequestBodyBytes(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []NodeConfig{{IP: "10.0.0.1"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error: %v", err)
+	}
+	if cfg.Gateway.MaxRequestBodyBytes != 32<<20 {
+		t.Errorf("MaxRequestBodyBytes = %d, want %d", cfg.Gateway.MaxRequestBodyBytes, 32<<20)
+	}
+	if got := cfg.Gateway.RequestBodyLimit(); got != 32<<20 {
+		t.Errorf("RequestBodyLimit() = %d, want %d", got, 32<<20)
+	}
+}
+
+func TestValidateExplicitMaxRequestBodyBytes(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3, MaxRequestBodyBytes: 4096},
+		Nodes:   []NodeConfig{{IP: "10.0.0.1"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error: %v", err)
+	}
+	if got := cfg.Gateway.RequestBodyLimit(); got != 4096 {
+		t.Errorf("RequestBodyLimit() = %d, want 4096", got)
+	}
+}
+
+func TestValidateRejectsNegativeMaxRequestBodyBytes(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3, MaxRequestBodyBytes: -1},
+		Nodes:   []NodeConfig{{IP: "10.0.0.1"}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for max_request_body_bytes < 0; a request body cap has no unlimited setting")
+	}
+}
+
+func TestRequestBodyLimitWithoutValidate(t *testing.T) {
+	var g GatewayConfig
+	if got := g.RequestBodyLimit(); got != 32<<20 {
+		t.Errorf("zero-value RequestBodyLimit() = %d, want %d", got, 32<<20)
+	}
+}

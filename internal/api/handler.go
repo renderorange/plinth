@@ -18,8 +18,6 @@ import (
 	"plinth/internal/metrics"
 )
 
-var maxBodyBytes int64 = 32 << 20
-
 type Handler struct {
 	state   atomic.Pointer[snapshot]
 	bal     *balancer.Balancer
@@ -161,7 +159,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 	st := h.state.Load()
 	limit := st.cfg.Gateway.ResponseBufferLimit()
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, st.cfg.Gateway.RequestBodyLimit())
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxErr *http.MaxBytesError
