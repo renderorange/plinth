@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1627,5 +1629,82 @@ func TestProxyToVLLMAbortBeforeBodySkipsPassthroughMetric(t *testing.T) {
 	}
 	if got := afterSL.GetCounter().GetValue() - beforeSL.GetCounter().GetValue(); got != 0 {
 		t.Errorf("ResponsePassthroughTotal{size_limit} delta = %v, want 0 (nothing was passed through)", got)
+	}
+}
+
+// captureStdout redirects os.Stdout for the duration of fn and returns what was
+// written. Mirrors internal/log's own test helper; used here because the only
+// observable difference between a client-side truncation and an upstream one is
+// the log line the handler emits.
+func captureStdout(fn func()) string {
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		panic(err)
+	}
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = old
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	return buf.String()
+}
+
+// TestProxyToVLLMStreamingClientWriteFailureNotUpstreamFailure covers a client
+// that stops accepting bytes once the gate has committed the response headers.
+// The node delivered a valid response, so the handler must not report an
+// upstream failure and must not leave the node in the offline set.
+func TestProxyToVLLMStreamingClientWriteFailureNotUpstreamFailure(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			io.WriteString(w, "data: one\n\n")
+			w.(http.Flusher).Flush()
+			io.WriteString(w, "data: two\n\n")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	h, mon := newTestHandlerWithBackend(backend.URL)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	// failAfter 0: commitGate.commit() writes the response headers before the
+	// body, so failing the very first body write is already "after commit" and
+	// is deterministic — unlike counting writes, which depends on how the
+	// upstream chunks happen to coalesce across the connection.
+	fw := &failingWriter{ResponseWriter: httptest.NewRecorder(), failAfter: 0}
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	logged := captureStdout(func() {
+		h.ServeHTTP(fw, req)
+	})
+
+	if fw.writes < 1 {
+		t.Fatalf("client writes = %d, want at least 1 so a body write was attempted", fw.writes)
+	}
+	rec, ok := fw.ResponseWriter.(*httptest.ResponseRecorder)
+	if !ok {
+		t.Fatalf("failingWriter.ResponseWriter is %T, want *httptest.ResponseRecorder", fw.ResponseWriter)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (headers were committed before the failed body write)", rec.Code)
+	}
+	if h.offline.skip("127.0.0.1") {
+		t.Error("client write failure left the node in the offline set; a failing client is not a node failure")
+	}
+	if strings.Contains(logged, "upstream failure") {
+		t.Errorf("logged an upstream failure for a client write error:\n%s", logged)
+	}
+	if !strings.Contains(logged, "stream truncated after commit") {
+		t.Errorf("missing client-side truncation log:\n%s", logged)
 	}
 }
