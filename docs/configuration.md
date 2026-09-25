@@ -13,6 +13,7 @@ listen = ":8000"
 metrics_listen = ":9090"
 health_interval = "3s"
 health_fail_threshold = 3
+max_buffered_response_bytes = 8388608
 
 # Standalone nodes — each independently serves non-ring models
 [[nodes]]
@@ -80,6 +81,7 @@ Gateway server settings.
 | `metrics_listen` | string | No | `:9090` | Address for the Prometheus metrics server |
 | `health_interval` | string | No | `3s` | Interval between health checks (Go duration format) |
 | `health_fail_threshold` | int | No | `3` | Consecutive failures before marking a node as dead |
+| `max_buffered_response_bytes` | int | No | `8388608` | Max bytes of a non-streaming upstream response buffered for retry. Responses over the limit are committed early and passed through to the client. `-1` = unlimited |
 
 #### Duration Format
 

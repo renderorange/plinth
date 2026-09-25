@@ -115,6 +115,7 @@ See [config/gateway.toml.example](config/gateway.toml.example) for a complete ex
 | `[gateway]` | `metrics_listen` | Prometheus metrics address | `:9090` |
 | `[gateway]` | `health_interval` | Health check interval | `3s` |
 | `[gateway]` | `health_fail_threshold` | Failures before marking dead | `3` |
+| `[gateway]` | `max_buffered_response_bytes` | Max buffered non-streaming response bytes | `8388608` |
 | `[[nodes]]` | `ip` | Node IP address | — |
 | `[[nodes]]` | `name` | Node display name | — |
 | `[[nodes]]` | `vllm_port` | vLLM API port | `8000` |
@@ -212,8 +213,8 @@ plinth/
 
 - **Config reload** — `SIGHUP` reloads nodes, models, rings, and health settings at runtime. In-flight requests finish against the old config; health state carries over for unchanged nodes; an invalid config is rejected with the current config kept. Listen address changes require a restart.
 - **No per-node model awareness** — Routing uses ring membership from config: ring models round-robin among that ring's nodes, all other models round-robin among ring-less nodes. The gateway does not verify which models each node actually serves.
-- **Streaming** — `stream: true` completion requests are streamed chunk-by-chunk to the client. Retry is allowed until the first chunk is flushed; once committed, an upstream failure terminates the stream (clean EOF, no fabricated `[DONE]`, never a 502 after commit). Stalled streams without a first chunk are abandoned and retried after a fixed 10s deadline. Non-streaming requests keep the buffered-attempt behavior.
-- **Connection-level retry only** — Requests whose proxy attempt fails to establish a connection (or times out before any response) are retried on other nodes in the pool. HTTP errors from vLLM are never retried (completions are not idempotent), and errors after response headers start return 502. Retrying on a *response-header timeout* carries a small duplicate-generation risk. For streaming requests, failures before the first chunk reach the client are retried; failures after commit terminate the stream instead of returning 502.
+- **Streaming** — `stream: true` completion requests are streamed chunk-by-chunk to the client. Retry is allowed until the first chunk is flushed; once committed, an upstream failure terminates the stream (clean EOF, no fabricated `[DONE]`, never a 502 after commit). Stalled streams without a first chunk are abandoned and retried after a fixed 10s deadline. Non-streaming requests are buffered up to max_buffered_response_bytes (default 8 MiB) so the attempt stays retryable; larger responses are committed early and passed through to the client.
+- **Connection-level retry only** — Requests whose proxy attempt fails to establish a connection (or times out before any response) are retried on other nodes in the pool. HTTP errors from vLLM are never retried (completions are not idempotent), and errors after response headers start return 502 unless the response has already been committed. Retrying on a *response-header timeout* carries a small duplicate-generation risk. For streaming requests, failures before the first chunk reach the client are retried; failures after commit terminate the stream instead of returning 502. Once a response is committed (buffered complete, or oversized and passed through), an upstream failure yields a truncated body and never a 502.
 - **Provisioning** — `plinth provision` installs drivers, Python, vLLM, the service user, and model weights, but not systemd services; service setup remains in `scripts/provision-node.sh`.
 
 ## License and Copyright
