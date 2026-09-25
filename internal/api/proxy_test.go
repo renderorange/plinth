@@ -475,11 +475,14 @@ func TestAttemptRecorderCommitOrderingOnFailingClientWrite(t *testing.T) {
 	if !a.committed {
 		t.Error("committed = false after WriteHeader started the client response; the handler could retry or rewrite the response")
 	}
-	if a.err == nil {
-		t.Fatal("attemptRecorder.err = nil, want the client write failure captured")
+	if a.err != nil {
+		t.Fatalf("attemptRecorder.err = %v, want nil: a client write failure is not an upstream failure", a.err)
 	}
-	if a.err.Error() != "client write failed" {
-		t.Errorf("attemptRecorder.err = %q, want %q", a.err.Error(), "client write failed")
+	if a.writeErr == nil {
+		t.Fatal("attemptRecorder.writeErr = nil, want the client write failure captured")
+	}
+	if a.writeErr.Error() != "client write failed" {
+		t.Errorf("attemptRecorder.writeErr = %q, want %q", a.writeErr.Error(), "client write failed")
 	}
 	if a.buf.Len() != 0 {
 		t.Errorf("buffer not reset on error: %q", a.buf.String())
@@ -489,8 +492,9 @@ func TestAttemptRecorderCommitOrderingOnFailingClientWrite(t *testing.T) {
 // TestAttemptRecorderPassThroughTailWriteErrorIsCaptured covers the client
 // write that happens after commit, while the remainder of an oversized response
 // streams through. failAfter 1 lets commit's buffered flush succeed and fails
-// the tail write, which must still land in attemptRecorder.err so the handler
-// logs "response truncated after commit" instead of counting a success.
+// the tail write, which must land in attemptRecorder.writeErr — never in err,
+// which carries upstream failures — so the handler logs a client-side
+// truncation instead of an upstream one.
 func TestAttemptRecorderPassThroughTailWriteErrorIsCaptured(t *testing.T) {
 	w := &failingWriter{ResponseWriter: httptest.NewRecorder(), failAfter: 1}
 	a := newAttemptRecorder(w, 10)
@@ -504,11 +508,14 @@ func TestAttemptRecorderPassThroughTailWriteErrorIsCaptured(t *testing.T) {
 	if !a.committed {
 		t.Fatal("committed = false after the buffered prefix was flushed to the client")
 	}
-	if a.err == nil {
-		t.Fatal("attemptRecorder.err = nil, want the tail client write failure captured")
+	if a.err != nil {
+		t.Fatalf("attemptRecorder.err = %v, want nil: a client write failure is not an upstream failure", a.err)
 	}
-	if a.err.Error() != "client write failed" {
-		t.Errorf("attemptRecorder.err = %q, want %q", a.err.Error(), "client write failed")
+	if a.writeErr == nil {
+		t.Fatal("attemptRecorder.writeErr = nil, want the tail client write failure captured")
+	}
+	if a.writeErr.Error() != "client write failed" {
+		t.Errorf("attemptRecorder.writeErr = %q, want %q", a.writeErr.Error(), "client write failed")
 	}
 }
 

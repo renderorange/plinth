@@ -31,10 +31,16 @@ var proxyTransport = &http.Transport{
 }
 
 type attemptResult struct {
-	status            int
-	header            http.Header
-	body              []byte
-	err               error
+	status int
+	header http.Header
+	body   []byte
+	err    error
+	// writeErr holds a client-side failure of the response write, as opposed
+	// to err, which carries upstream transport and body-read failures. The two
+	// must not share a channel: the handler reports err as an upstream problem
+	// and can leave the node in the offline set, while a client that stopped
+	// reading is not a node failure.
+	writeErr          error
 	committed         bool
 	passthroughReason string
 }
@@ -44,11 +50,15 @@ type attemptResult struct {
 // remainder through. limit <= 0 disables the bound. Once committed, every byte
 // goes to w and the attempt may not be retried or replaced with a 502.
 type attemptRecorder struct {
-	w                 http.ResponseWriter
-	limit             int64
-	header            http.Header
-	status            int
-	err               error
+	w      http.ResponseWriter
+	limit  int64
+	header http.Header
+	status int
+	err    error
+	// writeErr records failures writing the response to the client. It is kept
+	// separate from err, which ReverseProxy's ErrorHandler and errCaptureBody
+	// fill with upstream failures.
+	writeErr          error
 	buf               bytes.Buffer
 	committed         bool
 	passThrough       bool
@@ -97,7 +107,7 @@ func (a *attemptRecorder) writeThrough(p []byte) (int, error) {
 	}
 	n, err := a.w.Write(p)
 	if err != nil {
-		a.err = err
+		a.writeErr = err
 	}
 	return n, err
 }
@@ -120,7 +130,7 @@ func (a *attemptRecorder) commit() error {
 	a.committed = true
 	if a.buf.Len() > 0 {
 		if _, err := a.w.Write(a.buf.Bytes()); err != nil {
-			a.err = err
+			a.writeErr = err
 			a.buf.Reset()
 			return err
 		}
@@ -234,6 +244,7 @@ func proxyAttempt(r *http.Request, host string, port int, path string, w http.Re
 		header:            rec.header,
 		body:              rec.buf.Bytes(),
 		err:               rec.err,
+		writeErr:          rec.writeErr,
 		committed:         rec.committed,
 		passthroughReason: rec.passthroughReason,
 	}
