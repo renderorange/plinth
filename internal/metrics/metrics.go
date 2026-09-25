@@ -34,6 +34,10 @@ var (
 		Name: "gateway_response_passthrough_total",
 		Help: "Responses committed early and passed through to the client",
 	}, []string{"model", "reason"})
+	ClientWriteFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_response_client_write_failures_total",
+		Help: "Committed responses whose write to the client failed",
+	}, []string{"model"})
 	HealthCheckPanicsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "health_check_panics_total",
 		Help: "Total health probe panics recovered by the monitor",
@@ -48,5 +52,6 @@ func init() {
 	prometheus.MustRegister(RequestsTotal)
 	prometheus.MustRegister(ProxyAttemptsTotal)
 	prometheus.MustRegister(ResponsePassthroughTotal)
+	prometheus.MustRegister(ClientWriteFailuresTotal)
 	prometheus.MustRegister(HealthCheckPanicsTotal)
 }

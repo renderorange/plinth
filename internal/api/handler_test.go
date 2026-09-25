@@ -1399,6 +1399,7 @@ func TestProxyToVLLMClientWriteFailureNotUpstreamFailure(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
+	before := clientWriteFailures(t)
 	logged := captureStdout(func() {
 		h.ServeHTTP(fw, req)
 	})
@@ -1421,6 +1422,9 @@ func TestProxyToVLLMClientWriteFailureNotUpstreamFailure(t *testing.T) {
 	}
 	if !strings.Contains(logged, "client write failed after commit") {
 		t.Errorf("missing client-side write failure log:\n%s", logged)
+	}
+	if got := clientWriteFailures(t) - before; got != 1 {
+		t.Errorf("ClientWriteFailuresTotal delta = %v, want 1", got)
 	}
 }
 
@@ -1453,6 +1457,7 @@ func TestProxyToVLLMBufferedClientWriteFailureNotUpstreamFailure(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
+	before := clientWriteFailures(t)
 	logged := captureStdout(func() {
 		h.ServeHTTP(fw, req)
 	})
@@ -1475,6 +1480,9 @@ func TestProxyToVLLMBufferedClientWriteFailureNotUpstreamFailure(t *testing.T) {
 	}
 	if !strings.Contains(logged, "client write failed after commit") {
 		t.Errorf("missing client-side write failure log:\n%s", logged)
+	}
+	if got := clientWriteFailures(t) - before; got != 1 {
+		t.Errorf("ClientWriteFailuresTotal delta = %v, want 1", got)
 	}
 }
 
@@ -1760,6 +1768,15 @@ func captureStdout(fn func()) string {
 	return buf.String()
 }
 
+// clientWriteFailures reads the counter for the test model so a caller can
+// assert a delta across one request.
+func clientWriteFailures(t *testing.T) float64 {
+	t.Helper()
+	var m dto.Metric
+	metrics.ClientWriteFailuresTotal.WithLabelValues("test/model").Write(&m)
+	return m.GetCounter().GetValue()
+}
+
 // TestProxyToVLLMStreamingClientWriteFailureNotUpstreamFailure covers a client
 // that stops accepting bytes once the gate has committed the response headers.
 // The node delivered a valid response, so the handler must not report an
@@ -1793,6 +1810,7 @@ func TestProxyToVLLMStreamingClientWriteFailureNotUpstreamFailure(t *testing.T) 
 	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test/model","prompt":"hello","stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
 
+	before := clientWriteFailures(t)
 	logged := captureStdout(func() {
 		h.ServeHTTP(fw, req)
 	})
@@ -1815,5 +1833,8 @@ func TestProxyToVLLMStreamingClientWriteFailureNotUpstreamFailure(t *testing.T) 
 	}
 	if !strings.Contains(logged, "client write failed after commit") {
 		t.Errorf("missing client-side write failure log:\n%s", logged)
+	}
+	if got := clientWriteFailures(t) - before; got != 1 {
+		t.Errorf("ClientWriteFailuresTotal delta = %v, want 1", got)
 	}
 }

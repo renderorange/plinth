@@ -131,6 +131,7 @@ Returns Prometheus metrics for the gateway.
 | `gateway_request_duration_seconds` | Histogram | Request duration |
 | `gateway_requests_total` | Counter | Total requests by model and status |
 | `gateway_proxy_attempts_total` | Counter | Proxy attempts by model and observed status |
+| `gateway_response_client_write_failures_total` | Counter | Committed responses whose write to the client failed |
 | `gateway_response_passthrough_total` | Counter | Responses committed early and passed through to the client |
 | `health_check_panics_total` | Counter | Total health probe panics recovered by the monitor |
 
@@ -143,6 +144,10 @@ Returns Prometheus metrics for the gateway.
 
 - `model` — Model name from request
 - `status` — HTTP status code observed on the attempt
+
+**Labels for `gateway_response_client_write_failures_total`:**
+
+- `model` — Model name from request
 
 **Labels for `gateway_response_passthrough_total`:**
 
