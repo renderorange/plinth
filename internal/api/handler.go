@@ -325,7 +325,12 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 		switch classifyProxyError(res.err) {
 		case outcomeOK:
 			h.offline.clear(node.IP)
-			commitResponse(w, res)
+			if err := commitResponse(w, res); err != nil {
+				// The client stopped reading after the response was committed.
+				// The node delivered a valid response, so this is not a node
+				// failure and must not be retried or replaced with a 502.
+				log.Error("client write failed after commit", "node", node.IP, "error", err.Error())
+			}
 			metrics.RequestDuration.Observe(time.Since(start).Seconds())
 			metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", res.status)).Inc()
 			metrics.ProxyAttemptsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", res.status)).Inc()

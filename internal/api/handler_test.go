@@ -1424,6 +1424,60 @@ func TestProxyToVLLMClientWriteFailureNotUpstreamFailure(t *testing.T) {
 	}
 }
 
+// TestProxyToVLLMBufferedClientWriteFailureNotUpstreamFailure covers the third
+// path a client write can fail on: a small response that is fully buffered, so
+// the attempt never commits early and commitResponse is what writes to the
+// client. Without this, a client disconnect was visible only when the response
+// happened to exceed the buffer limit.
+func TestProxyToVLLMBufferedClientWriteFailureNotUpstreamFailure(t *testing.T) {
+	payload := `{"id":"1"}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, payload)
+	}))
+	defer backend.Close()
+	port := extractPort(t, backend.URL)
+
+	// Limit far above the payload so the attempt buffers and takes outcomeOK.
+	h, mon := newTestHandlerWithPortLimit(port, 1<<20)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	// failAfter 0: commitResponse writes the response headers before the body,
+	// so failing the very first body write is already "after commit".
+	fw := &failingWriter{ResponseWriter: httptest.NewRecorder(), failAfter: 0}
+
+	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	logged := captureStdout(func() {
+		h.ServeHTTP(fw, req)
+	})
+
+	if fw.writes < 1 {
+		t.Fatalf("client writes = %d, want at least 1 so a body write was attempted", fw.writes)
+	}
+	rec, ok := fw.ResponseWriter.(*httptest.ResponseRecorder)
+	if !ok {
+		t.Fatalf("failingWriter.ResponseWriter is %T, want *httptest.ResponseRecorder", fw.ResponseWriter)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (the node answered; the client simply stopped reading)", rec.Code)
+	}
+	if h.offline.skip("127.0.0.1") {
+		t.Error("client write failure left the node in the offline set; a failing client is not a node failure")
+	}
+	if strings.Contains(logged, "response truncated after commit") || strings.Contains(logged, "upstream failure") {
+		t.Errorf("logged an upstream problem for a client write error:\n%s", logged)
+	}
+	if !strings.Contains(logged, "client write failed after commit") {
+		t.Errorf("missing client-side write failure log:\n%s", logged)
+	}
+}
+
 func TestProxyToVLLMTruncatedAfterCommitDoesNotWrite502(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

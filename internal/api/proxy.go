@@ -269,7 +269,10 @@ func newProxy(host string, port int, path string, r *http.Request) (*httputil.Re
 	return proxy, nil
 }
 
-func commitResponse(w http.ResponseWriter, res *attemptResult) {
+// commitResponse writes a fully buffered attempt to the client. The returned
+// error is a client-side write failure, never an upstream one: by this point
+// the node has already delivered the complete response.
+func commitResponse(w http.ResponseWriter, res *attemptResult) error {
 	for k, vv := range res.header {
 		for _, v := range vv {
 			w.Header().Add(k, v)
@@ -280,5 +283,6 @@ func commitResponse(w http.ResponseWriter, res *attemptResult) {
 		status = http.StatusBadGateway
 	}
 	w.WriteHeader(status)
-	_, _ = w.Write(res.body)
+	_, err := w.Write(res.body)
+	return err
 }
