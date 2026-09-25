@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func extractPort(t *testing.T, serverURL string) int {
@@ -42,6 +43,8 @@ func TestClassifyProxyError(t *testing.T) {
 		{"dial refused retries", &url.Error{Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}, outcomeRetry},
 		{"dial timeout retries", &url.Error{Err: &net.OpError{Op: "dial", Net: "tcp", Err: timeoutErr}}, outcomeRetry},
 		{"non-dial timeout retries", timeoutErr, outcomeRetry},
+		{"response-header timeout retries", deadlineClaimingTimeout{}, outcomeRetry},
+		{"deadline claiming timeout wrapped retries", &url.Error{Op: "Get", Err: deadlineClaimingTimeout{}}, outcomeRetry},
 		{"deadline exceeded is client aborted", context.DeadlineExceeded, outcomeClientAborted},
 		{"canceled is client aborted", context.Canceled, outcomeClientAborted},
 		{"read reset is fail", &url.Error{Err: &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}}, outcomeFail},
@@ -62,6 +65,21 @@ type timeoutError struct{}
 func (e *timeoutError) Error() string   { return "i/o timeout" }
 func (e *timeoutError) Timeout() bool   { return true }
 func (e *timeoutError) Temporary() bool { return true }
+
+// deadlineClaimingTimeout mirrors net/http's unexported *timeoutError, returned
+// as "net/http: timeout awaiting response headers" when ResponseHeaderTimeout
+// fires. It satisfies net.Error and reports
+// errors.Is(err, context.DeadlineExceeded) via Is, but exposes no Unwrap chain,
+// so it is distinguishable from a genuine context.DeadlineExceeded only by
+// walking the unwrap chain rather than by errors.Is.
+type deadlineClaimingTimeout struct{}
+
+func (deadlineClaimingTimeout) Error() string   { return "net/http: timeout awaiting response headers" }
+func (deadlineClaimingTimeout) Timeout() bool   { return true }
+func (deadlineClaimingTimeout) Temporary() bool { return true }
+func (deadlineClaimingTimeout) Is(err error) bool {
+	return err == context.DeadlineExceeded
+}
 
 func TestIsWriteOpError(t *testing.T) {
 	tests := []struct {
@@ -125,6 +143,37 @@ func TestProxyAttemptDialRefused(t *testing.T) {
 	}
 	if res.status != 0 {
 		t.Errorf("status = %d, want 0 (nothing written on failure)", res.status)
+	}
+}
+
+// TestProxyAttemptResponseHeaderTimeoutRetries reproduces the real net/http
+// error returned when ResponseHeaderTimeout fires: *http.timeoutError, whose
+// Is method reports errors.Is(err, context.DeadlineExceeded). It must be
+// classified as a retryable node-side timeout, not a client abort.
+func TestProxyAttemptResponseHeaderTimeoutRetries(t *testing.T) {
+	old := proxyTransport.ResponseHeaderTimeout
+	proxyTransport.ResponseHeaderTimeout = 100 * time.Millisecond
+	defer func() { proxyTransport.ResponseHeaderTimeout = old }()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+	}))
+	defer backend.Close()
+	port := extractPort(t, backend.URL)
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions", httptest.NewRecorder(), 0)
+	if err != nil {
+		t.Fatalf("proxyAttempt error: %v", err)
+	}
+	if res.err == nil {
+		t.Fatal("expected response-header timeout error")
+	}
+	if !strings.Contains(res.err.Error(), "timeout awaiting response headers") {
+		t.Fatalf("res.err = %v, want net/http response-header timeout", res.err)
+	}
+	if got := classifyProxyError(res.err); got != outcomeRetry {
+		t.Errorf("classify = %v, want outcomeRetry (response-header timeout must be retried)", got)
 	}
 }
 
@@ -434,6 +483,32 @@ func TestAttemptRecorderCommitOrderingOnFailingClientWrite(t *testing.T) {
 	}
 	if a.buf.Len() != 0 {
 		t.Errorf("buffer not reset on error: %q", a.buf.String())
+	}
+}
+
+// TestAttemptRecorderPassThroughTailWriteErrorIsCaptured covers the client
+// write that happens after commit, while the remainder of an oversized response
+// streams through. failAfter 1 lets commit's buffered flush succeed and fails
+// the tail write, which must still land in attemptRecorder.err so the handler
+// logs "response truncated after commit" instead of counting a success.
+func TestAttemptRecorderPassThroughTailWriteErrorIsCaptured(t *testing.T) {
+	w := &failingWriter{ResponseWriter: httptest.NewRecorder(), failAfter: 1}
+	a := newAttemptRecorder(w, 10)
+	a.WriteHeader(200)
+	if _, err := a.Write([]byte("abcd")); err != nil {
+		t.Fatalf("buffered Write error: %v", err)
+	}
+	if _, err := a.Write(bytes.Repeat([]byte("x"), 20)); err == nil {
+		t.Fatal("pass-through tail Write error = nil, want client write failure")
+	}
+	if !a.committed {
+		t.Fatal("committed = false after the buffered prefix was flushed to the client")
+	}
+	if a.err == nil {
+		t.Fatal("attemptRecorder.err = nil, want the tail client write failure captured")
+	}
+	if a.err.Error() != "client write failed" {
+		t.Errorf("attemptRecorder.err = %q, want %q", a.err.Error(), "client write failed")
 	}
 }
 

@@ -95,7 +95,11 @@ func (a *attemptRecorder) writeThrough(p []byte) (int, error) {
 			return 0, err
 		}
 	}
-	return a.w.Write(p)
+	n, err := a.w.Write(p)
+	if err != nil {
+		a.err = err
+	}
+	return n, err
 }
 
 func (a *attemptRecorder) commit() error {
@@ -158,11 +162,27 @@ const (
 	outcomeClientAborted
 )
 
+// reachedContextDeadline reports whether err unwraps to context.DeadlineExceeded
+// itself. Unlike errors.Is, this ignores custom Is methods: net/http's
+// response-header timeoutError declares
+// Is(err) { return err == context.DeadlineExceeded } while exposing no Unwrap
+// chain, so errors.Is cannot tell a node-side header timeout apart from a
+// genuine client deadline. Walking the unwrap chain can.
+func reachedContextDeadline(err error) bool {
+	for err != nil {
+		if err == context.DeadlineExceeded {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
+}
+
 func classifyProxyError(err error) attemptOutcome {
 	if err == nil {
 		return outcomeOK
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) || reachedContextDeadline(err) {
 		return outcomeClientAborted
 	}
 	var opErr *net.OpError
