@@ -252,7 +252,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 				// The client stopped reading after the response was committed.
 				// The node delivered a valid response, so this is not a node
 				// failure and must never be retried or replaced with a 502.
-				log.Error("stream truncated after commit", "node", node.IP, "error", gate.writeErr.Error())
+				log.Error("client write failed after commit", "node", node.IP, "error", gate.writeErr.Error())
 				h.offline.clear(node.IP)
 				metrics.RequestDuration.Observe(time.Since(start).Seconds())
 				metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", gate.status)).Inc()
@@ -311,7 +311,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 				// The client stopped reading after the response was committed.
 				// The node delivered a valid response, so this is not a node
 				// failure and must not be retried or replaced with a 502.
-				log.Error("response truncated by client after commit", "node", node.IP, "error", res.writeErr.Error())
+				log.Error("client write failed after commit", "node", node.IP, "error", res.writeErr.Error())
 				h.offline.clear(node.IP)
 			default:
 				h.offline.clear(node.IP)

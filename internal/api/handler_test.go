@@ -1419,8 +1419,8 @@ func TestProxyToVLLMClientWriteFailureNotUpstreamFailure(t *testing.T) {
 	if strings.Contains(logged, "response truncated after commit") {
 		t.Errorf("logged an upstream truncation for a client write error:\n%s", logged)
 	}
-	if !strings.Contains(logged, "response truncated by client after commit") {
-		t.Errorf("missing client-side truncation log:\n%s", logged)
+	if !strings.Contains(logged, "client write failed after commit") {
+		t.Errorf("missing client-side write failure log:\n%s", logged)
 	}
 }
 
@@ -1759,7 +1759,7 @@ func TestProxyToVLLMStreamingClientWriteFailureNotUpstreamFailure(t *testing.T) 
 	if strings.Contains(logged, "upstream failure") {
 		t.Errorf("logged an upstream failure for a client write error:\n%s", logged)
 	}
-	if !strings.Contains(logged, "stream truncated after commit") {
-		t.Errorf("missing client-side truncation log:\n%s", logged)
+	if !strings.Contains(logged, "client write failed after commit") {
+		t.Errorf("missing client-side write failure log:\n%s", logged)
 	}
 }
