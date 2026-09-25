@@ -86,9 +86,11 @@ Prometheus metrics for the gateway:
 - `cluster_nodes_healthy` — Gauge for healthy node count
 - `cluster_nodes_degraded` — Gauge for degraded node count
 - `cluster_nodes_dead` — Gauge for dead node count
+- `gateway_proxy_attempts_total` — Counter for proxy attempts by model and observed status
 - `gateway_request_duration_seconds` — Histogram for request latency
 - `gateway_requests_total` — Counter for requests by model and status
 - `gateway_response_passthrough_total` — Counter for responses committed early and passed through to the client, labeled by model and reason (`size_limit`, `content_length`)
+- `health_check_panics_total` — Counter for health probe panics recovered by the monitor
 
 ### `internal/provision/`
 
