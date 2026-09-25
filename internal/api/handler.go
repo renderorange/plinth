@@ -159,6 +159,7 @@ func (h *Handler) filterByRing(states []health.NodeState, modelName string) []he
 func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path string) {
 	start := time.Now()
 	st := h.state.Load()
+	limit := st.cfg.Gateway.ResponseBufferLimit()
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	raw, err := io.ReadAll(r.Body)
@@ -275,11 +276,32 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 			continue
 		}
 
-		res, err := proxyAttempt(r, node.IP, port, path, w, 0)
+		res, err := proxyAttempt(r, node.IP, port, path, w, limit)
 		if err != nil {
 			http.Error(w, "failed to parse proxy target URL", http.StatusInternalServerError)
 			metrics.RequestDuration.Observe(time.Since(start).Seconds())
 			metrics.RequestsTotal.WithLabelValues(modelName, "500").Inc()
+			return
+		}
+
+		if res.passthroughReason != "" {
+			log.Info("response exceeded buffer limit; passing through", "node", node.IP, "reason", res.passthroughReason, "limit", fmt.Sprintf("%d", limit))
+			metrics.ResponsePassthroughTotal.WithLabelValues(modelName, res.passthroughReason).Inc()
+		}
+
+		if res.committed {
+			status := res.status
+			if status == 0 {
+				status = http.StatusBadGateway
+			}
+			if res.err != nil {
+				log.Error("response truncated after commit", "node", node.IP, "error", res.err.Error())
+			} else {
+				h.offline.clear(node.IP)
+			}
+			metrics.RequestDuration.Observe(time.Since(start).Seconds())
+			metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", status)).Inc()
+			metrics.ProxyAttemptsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", status)).Inc()
 			return
 		}
 

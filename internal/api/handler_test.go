@@ -217,6 +217,29 @@ func newTestHandlerWithBackend(backendURL string) (*Handler, *health.Monitor) {
 	return NewHandler(cfg, mon, bal), mon
 }
 
+func newTestHandlerWithPortLimit(port int, limit int64) (*Handler, *health.Monitor) {
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Gateway: config.GatewayConfig{
+			HealthInterval:           100 * time.Millisecond,
+			HealthFailThreshold:      3,
+			MaxBufferedResponseBytes: limit,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "node-1", VLLMPort: port, MetricsPort: port},
+		},
+		Models: config.ModelsConfig{
+			Default: "test/model",
+			Available: []config.ModelConfig{
+				{Name: "test/model", PipelineStages: 1},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	bal := balancer.New()
+	return NewHandler(cfg, mon, bal), mon
+}
+
 func TestHealthEndpointWithHealthyNodes(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1294,5 +1317,163 @@ func TestProxyToVLLMStreamingClientAbortPreCommit(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("body %q written despite client abort", rec.Body.String())
+	}
+}
+
+func TestProxyToVLLMOverflowPassesThrough(t *testing.T) {
+	payload := strings.Repeat("x", 100)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, payload)
+	}))
+	defer backend.Close()
+	port := extractPort(t, backend.URL)
+
+	h, mon := newTestHandlerWithPortLimit(port, 10)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	if w.Body.String() != payload {
+		t.Errorf("client body len = %d, want %d", w.Body.Len(), len(payload))
+	}
+	if h.offline.skip("127.0.0.1") {
+		t.Error("overflow marked node offline; overflow is not a node failure")
+	}
+}
+
+func TestProxyToVLLMTruncatedAfterCommitDoesNotWrite502(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				req, err := http.ReadRequest(br)
+				if err != nil {
+					return
+				}
+				io.Copy(io.Discard, req.Body)
+				req.Body.Close()
+				io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 100\r\n\r\n"+strings.Repeat("y", 20))
+			}(conn)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	h, mon := newTestHandlerWithPortLimit(port, 10)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Body.Len() == 0 {
+		t.Fatal("client body empty; test cannot distinguish commit from a defaulted recorder code")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (already committed; never 502 after commit)", w.Code)
+	}
+	if h.offline.skip("127.0.0.1") {
+		t.Error("post-commit truncation marked node offline")
+	}
+	if strings.Contains(w.Body.String(), "upstream node error") {
+		t.Errorf("body contains fallback error text after commit: %q", w.Body.String())
+	}
+}
+
+func TestProxyToVLLMOverflowRecordsPassthroughMetric(t *testing.T) {
+	payload := strings.Repeat("x", 100)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		io.WriteString(w, payload)
+	}))
+	defer backend.Close()
+	port := extractPort(t, backend.URL)
+
+	h, mon := newTestHandlerWithPortLimit(port, 10)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	var before dto.Metric
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "size_limit").Write(&before)
+
+	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	var after dto.Metric
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "size_limit").Write(&after)
+
+	got := after.GetCounter().GetValue() - before.GetCounter().GetValue()
+	if got != 1 {
+		t.Errorf("ResponsePassthroughTotal delta = %v, want 1", got)
+	}
+}
+
+func TestProxyToVLLMSmallResponseStillBuffered(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer backend.Close()
+	port := extractPort(t, backend.URL)
+
+	h, mon := newTestHandlerWithPortLimit(port, 64)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	var beforeCL, beforeSL dto.Metric
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "content_length").Write(&beforeCL)
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "size_limit").Write(&beforeSL)
+
+	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	if w.Body.String() != `{"ok":true}` {
+		t.Errorf("body = %q", w.Body.String())
+	}
+	var afterCL, afterSL dto.Metric
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "content_length").Write(&afterCL)
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "size_limit").Write(&afterSL)
+	if got := afterCL.GetCounter().GetValue() - beforeCL.GetCounter().GetValue(); got != 0 {
+		t.Errorf("ResponsePassthroughTotal{content_length} delta = %v, want 0 (small response must stay buffered)", got)
+	}
+	if got := afterSL.GetCounter().GetValue() - beforeSL.GetCounter().GetValue(); got != 0 {
+		t.Errorf("ResponsePassthroughTotal{size_limit} delta = %v, want 0 (small response must stay buffered)", got)
 	}
 }
