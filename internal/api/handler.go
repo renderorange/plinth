@@ -284,7 +284,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 			return
 		}
 
-		if res.passthroughReason != "" {
+		if res.passthroughReason != "" && res.committed {
 			log.Info("response exceeded buffer limit; passing through", "node", node.IP, "reason", res.passthroughReason, "limit", fmt.Sprintf("%d", limit))
 			metrics.ResponsePassthroughTotal.WithLabelValues(modelName, res.passthroughReason).Inc()
 		}

@@ -113,13 +113,15 @@ func (a *attemptRecorder) commit() error {
 		status = http.StatusBadGateway
 	}
 	a.w.WriteHeader(status)
+	a.committed = true
 	if a.buf.Len() > 0 {
 		if _, err := a.w.Write(a.buf.Bytes()); err != nil {
+			a.err = err
+			a.buf.Reset()
 			return err
 		}
 		a.buf.Reset()
 	}
-	a.committed = true
 	return nil
 }
 

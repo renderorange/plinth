@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -392,6 +393,47 @@ func TestAttemptRecorderUnlimitedNeverCommitsEarly(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("client received %q, want nothing until commit", rec.Body.String())
+	}
+}
+
+type failingWriter struct {
+	http.ResponseWriter
+	failAfter int
+	writes    int
+}
+
+func (f *failingWriter) Write(p []byte) (int, error) {
+	f.writes++
+	if f.writes > f.failAfter {
+		return 0, errors.New("client write failed")
+	}
+	return f.ResponseWriter.Write(p)
+}
+
+func TestAttemptRecorderCommitOrderingOnFailingClientWrite(t *testing.T) {
+	w := &failingWriter{ResponseWriter: httptest.NewRecorder(), failAfter: 0}
+	a := newAttemptRecorder(w, 10)
+	a.WriteHeader(200)
+	if _, err := a.Write([]byte("abcd")); err != nil {
+		t.Fatalf("buffered Write error: %v", err)
+	}
+	if a.committed {
+		t.Fatal("committed = true before overflow")
+	}
+	if _, err := a.Write(bytes.Repeat([]byte("x"), 20)); err == nil {
+		t.Fatal("overflow Write error = nil, want client write failure")
+	}
+	if !a.committed {
+		t.Error("committed = false after WriteHeader started the client response; the handler could retry or rewrite the response")
+	}
+	if a.err == nil {
+		t.Fatal("attemptRecorder.err = nil, want the client write failure captured")
+	}
+	if a.err.Error() != "client write failed" {
+		t.Errorf("attemptRecorder.err = %q, want %q", a.err.Error(), "client write failed")
+	}
+	if a.buf.Len() != 0 {
+		t.Errorf("buffer not reset on error: %q", a.buf.String())
 	}
 }
 

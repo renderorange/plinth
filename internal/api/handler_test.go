@@ -1325,6 +1325,7 @@ func TestProxyToVLLMOverflowPassesThrough(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
 		io.WriteString(w, payload)
 	}))
 	defer backend.Close()
@@ -1475,5 +1476,61 @@ func TestProxyToVLLMSmallResponseStillBuffered(t *testing.T) {
 	}
 	if got := afterSL.GetCounter().GetValue() - beforeSL.GetCounter().GetValue(); got != 0 {
 		t.Errorf("ResponsePassthroughTotal{size_limit} delta = %v, want 0 (small response must stay buffered)", got)
+	}
+}
+
+func TestProxyToVLLMAbortBeforeBodySkipsPassthroughMetric(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				req, err := http.ReadRequest(br)
+				if err != nil {
+					return
+				}
+				io.Copy(io.Discard, req.Body)
+				req.Body.Close()
+				io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 100\r\n\r\n")
+			}(conn)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	h, mon := newTestHandlerWithPortLimit(port, 10)
+	mon.Start()
+	defer mon.Stop()
+	waitForHealthy(t, mon)
+
+	var beforeCL, beforeSL dto.Metric
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "content_length").Write(&beforeCL)
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "size_limit").Write(&beforeSL)
+
+	body := `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (no body byte was passed through; the attempt must fail)", w.Code)
+	}
+	var afterCL, afterSL dto.Metric
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "content_length").Write(&afterCL)
+	metrics.ResponsePassthroughTotal.WithLabelValues("test/model", "size_limit").Write(&afterSL)
+	if got := afterCL.GetCounter().GetValue() - beforeCL.GetCounter().GetValue(); got != 0 {
+		t.Errorf("ResponsePassthroughTotal{content_length} delta = %v, want 0 (nothing was passed through)", got)
+	}
+	if got := afterSL.GetCounter().GetValue() - beforeSL.GetCounter().GetValue(); got != 0 {
+		t.Errorf("ResponsePassthroughTotal{size_limit} delta = %v, want 0 (nothing was passed through)", got)
 	}
 }
