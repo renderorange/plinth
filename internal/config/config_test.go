@@ -451,3 +451,65 @@ func TestModelRing(t *testing.T) {
 		t.Errorf("ModelRing(nonexistent) = %q, want empty", ring)
 	}
 }
+
+func TestValidateDefaultMaxBufferedResponseBytes(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []NodeConfig{{IP: "10.0.0.1"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error: %v", err)
+	}
+	if cfg.Gateway.MaxBufferedResponseBytes != 8<<20 {
+		t.Errorf("MaxBufferedResponseBytes = %d, want %d", cfg.Gateway.MaxBufferedResponseBytes, 8<<20)
+	}
+	if got := cfg.Gateway.ResponseBufferLimit(); got != 8<<20 {
+		t.Errorf("ResponseBufferLimit() = %d, want %d", got, 8<<20)
+	}
+}
+
+func TestValidateExplicitMaxBufferedResponseBytes(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3, MaxBufferedResponseBytes: 1024},
+		Nodes:   []NodeConfig{{IP: "10.0.0.1"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error: %v", err)
+	}
+	if got := cfg.Gateway.ResponseBufferLimit(); got != 1024 {
+		t.Errorf("ResponseBufferLimit() = %d, want 1024", got)
+	}
+}
+
+func TestValidateUnlimitedMaxBufferedResponseBytes(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3, MaxBufferedResponseBytes: -1},
+		Nodes:   []NodeConfig{{IP: "10.0.0.1"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error: %v", err)
+	}
+	if cfg.Gateway.MaxBufferedResponseBytes != -1 {
+		t.Errorf("MaxBufferedResponseBytes = %d, want -1 preserved", cfg.Gateway.MaxBufferedResponseBytes)
+	}
+	if got := cfg.Gateway.ResponseBufferLimit(); got != 0 {
+		t.Errorf("ResponseBufferLimit() = %d, want 0 (unlimited)", got)
+	}
+}
+
+func TestValidateRejectsInvalidMaxBufferedResponseBytes(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3, MaxBufferedResponseBytes: -2},
+		Nodes:   []NodeConfig{{IP: "10.0.0.1"}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for max_buffered_response_bytes < -1")
+	}
+}
+
+func TestResponseBufferLimitWithoutValidate(t *testing.T) {
+	var g GatewayConfig
+	if got := g.ResponseBufferLimit(); got != 8<<20 {
+		t.Errorf("zero-value ResponseBufferLimit() = %d, want %d", got, 8<<20)
+	}
+}

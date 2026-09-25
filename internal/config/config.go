@@ -21,10 +21,24 @@ type ClusterConfig struct {
 }
 
 type GatewayConfig struct {
-	Listen              string
-	MetricsListen       string
-	HealthInterval      time.Duration
-	HealthFailThreshold int
+	Listen                   string
+	MetricsListen            string
+	HealthInterval           time.Duration
+	HealthFailThreshold      int
+	MaxBufferedResponseBytes int64
+}
+
+// ResponseBufferLimit returns the effective max buffered upstream response
+// size in bytes. A return of 0 means unlimited.
+func (g GatewayConfig) ResponseBufferLimit() int64 {
+	switch {
+	case g.MaxBufferedResponseBytes == 0:
+		return defaultMaxBufferedResponseBytes
+	case g.MaxBufferedResponseBytes < 0:
+		return 0
+	default:
+		return g.MaxBufferedResponseBytes
+	}
 }
 
 type NodeConfig struct {
@@ -62,6 +76,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.HealthFailThreshold <= 0 {
 		return fmt.Errorf("health_fail_threshold must be greater than zero")
+	}
+	if c.Gateway.MaxBufferedResponseBytes < -1 {
+		return fmt.Errorf("max_buffered_response_bytes must be -1 (unlimited) or non-negative")
+	}
+	if c.Gateway.MaxBufferedResponseBytes == 0 {
+		c.Gateway.MaxBufferedResponseBytes = defaultMaxBufferedResponseBytes
 	}
 	if len(c.Nodes) == 0 {
 		return fmt.Errorf("at least one node must be configured")

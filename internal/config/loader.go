@@ -19,6 +19,8 @@ const (
 	defaultSSHKeyPath      = "~/.ssh/id_rsa"
 	defaultGPUExporterBin  = "./gpu-exporter"
 	defaultServiceFilesDir = "./scripts"
+
+	defaultMaxBufferedResponseBytes int64 = 8 << 20
 )
 
 type rawConfig struct {
@@ -30,10 +32,11 @@ type rawConfig struct {
 }
 
 type rawGatewayConfig struct {
-	Listen              string
-	MetricsListen       string `toml:"metrics_listen"`
-	HealthInterval      string `toml:"health_interval"`
-	HealthFailThreshold int    `toml:"health_fail_threshold"`
+	Listen                   string
+	MetricsListen            string `toml:"metrics_listen"`
+	HealthInterval           string `toml:"health_interval"`
+	HealthFailThreshold      int    `toml:"health_fail_threshold"`
+	MaxBufferedResponseBytes int64  `toml:"max_buffered_response_bytes"`
 }
 
 func Load(path string) (*Config, error) {
@@ -50,9 +53,10 @@ func Load(path string) (*Config, error) {
 	cfg := &Config{
 		Cluster: raw.Cluster,
 		Gateway: GatewayConfig{
-			Listen:              raw.Gateway.Listen,
-			MetricsListen:       raw.Gateway.MetricsListen,
-			HealthFailThreshold: raw.Gateway.HealthFailThreshold,
+			Listen:                   raw.Gateway.Listen,
+			MetricsListen:            raw.Gateway.MetricsListen,
+			HealthFailThreshold:      raw.Gateway.HealthFailThreshold,
+			MaxBufferedResponseBytes: raw.Gateway.MaxBufferedResponseBytes,
 		},
 		Nodes:     raw.Nodes,
 		Models:    raw.Models,
