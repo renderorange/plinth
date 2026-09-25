@@ -31,35 +31,107 @@ var proxyTransport = &http.Transport{
 }
 
 type attemptResult struct {
-	status int
-	header http.Header
-	body   []byte
-	err    error
+	status            int
+	header            http.Header
+	body              []byte
+	err               error
+	committed         bool
+	passthroughReason string
 }
 
-type bufferedRecorder struct {
-	header http.Header
-	status int
-	body   bytes.Buffer
-	err    error
+// attemptRecorder buffers an upstream response until it completes or exceeds
+// limit bytes. On overflow it commits the buffered prefix to w and passes the
+// remainder through. limit <= 0 disables the bound. Once committed, every byte
+// goes to w and the attempt may not be retried or replaced with a 502.
+type attemptRecorder struct {
+	w                 http.ResponseWriter
+	limit             int64
+	header            http.Header
+	status            int
+	err               error
+	buf               bytes.Buffer
+	committed         bool
+	passThrough       bool
+	passthroughReason string
 }
 
-func (b *bufferedRecorder) Header() http.Header {
-	if b.header == nil {
-		b.header = make(http.Header)
+func newAttemptRecorder(w http.ResponseWriter, limit int64) *attemptRecorder {
+	return &attemptRecorder{w: w, limit: limit, header: make(http.Header)}
+}
+
+func (a *attemptRecorder) Header() http.Header {
+	if a.header == nil {
+		a.header = make(http.Header)
 	}
-	return b.header
+	return a.header
 }
 
-func (b *bufferedRecorder) WriteHeader(code int) {
-	if b.status != 0 {
+func (a *attemptRecorder) WriteHeader(code int) {
+	if a.status != 0 {
 		return
 	}
-	b.status = code
+	a.status = code
 }
 
-func (b *bufferedRecorder) Write(p []byte) (int, error) {
-	return b.body.Write(p)
+func (a *attemptRecorder) Write(p []byte) (int, error) {
+	if a.committed || a.passThrough {
+		return a.writeThrough(p)
+	}
+	if a.limit > 0 && int64(a.buf.Len())+int64(len(p)) > a.limit {
+		if a.passthroughReason == "" {
+			a.passthroughReason = "size_limit"
+		}
+		if err := a.commit(); err != nil {
+			return 0, err
+		}
+		return a.writeThrough(p)
+	}
+	return a.buf.Write(p)
+}
+
+func (a *attemptRecorder) writeThrough(p []byte) (int, error) {
+	if !a.committed {
+		if err := a.commit(); err != nil {
+			return 0, err
+		}
+	}
+	return a.w.Write(p)
+}
+
+func (a *attemptRecorder) commit() error {
+	if a.committed {
+		return nil
+	}
+	dst := a.w.Header()
+	for k, vv := range a.header {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
+	status := a.status
+	if status == 0 {
+		status = http.StatusBadGateway
+	}
+	a.w.WriteHeader(status)
+	if a.buf.Len() > 0 {
+		if _, err := a.w.Write(a.buf.Bytes()); err != nil {
+			return err
+		}
+		a.buf.Reset()
+	}
+	a.committed = true
+	return nil
+}
+
+// Flush forwards to the client only after commit; while buffering there is
+// nothing to flush.
+func (a *attemptRecorder) Flush() {
+	if !a.committed {
+		return
+	}
+	if f, ok := a.w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 type errCaptureBody struct {
@@ -113,30 +185,40 @@ func isWriteOpError(err error) bool {
 	return errors.As(err, &opErr) && opErr.Op == "write"
 }
 
-func proxyAttempt(r *http.Request, host string, port int, path string) (*attemptResult, error) {
+func proxyAttempt(r *http.Request, host string, port int, path string, w http.ResponseWriter, limit int64) (*attemptResult, error) {
 	proxy, err := newProxy(host, port, path, r)
 	if err != nil {
 		return nil, err
 	}
 
-	buf := &bufferedRecorder{header: make(http.Header)}
+	rec := newAttemptRecorder(w, limit)
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		buf.err = err
+		rec.err = err
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		if rec.limit > 0 && resp.ContentLength > rec.limit {
+			rec.passThrough = true
+			rec.passthroughReason = "content_length"
+		}
 		resp.Body = &errCaptureBody{ReadCloser: resp.Body, onErr: func(err error) {
-			buf.err = err
+			rec.err = err
 		}}
 		return nil
 	}
-	proxy.ServeHTTP(buf, r)
+	proxy.ServeHTTP(rec, r)
 
-	return &attemptResult{
-		status: buf.status,
-		header: buf.header,
-		body:   buf.body.Bytes(),
-		err:    buf.err,
-	}, nil
+	res := &attemptResult{
+		status:            rec.status,
+		header:            rec.header,
+		body:              rec.buf.Bytes(),
+		err:               rec.err,
+		committed:         rec.committed,
+		passthroughReason: rec.passthroughReason,
+	}
+	if rec.committed {
+		res.body = nil
+	}
+	return res, nil
 }
 
 func newProxy(host string, port int, path string, r *http.Request) (*httputil.ReverseProxy, error) {

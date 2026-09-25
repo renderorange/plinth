@@ -275,7 +275,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 			continue
 		}
 
-		res, err := proxyAttempt(r, node.IP, port, path)
+		res, err := proxyAttempt(r, node.IP, port, path, w, 0)
 		if err != nil {
 			http.Error(w, "failed to parse proxy target URL", http.StatusInternalServerError)
 			metrics.RequestDuration.Observe(time.Since(start).Seconds())

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -91,7 +92,7 @@ func TestProxyAttemptSuccess(t *testing.T) {
 	port := extractPort(t, backend.URL)
 
 	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"prompt":"hi"}`))
-	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions")
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions", httptest.NewRecorder(), 0)
 	if err != nil {
 		t.Fatalf("proxyAttempt error: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestProxyAttemptSuccess(t *testing.T) {
 
 func TestProxyAttemptDialRefused(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
-	res, err := proxyAttempt(req, "127.0.0.1", 1, "/v1/completions")
+	res, err := proxyAttempt(req, "127.0.0.1", 1, "/v1/completions", httptest.NewRecorder(), 0)
 	if err != nil {
 		t.Fatalf("proxyAttempt error: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestProxyAttemptTruncatedBodyIsFail(t *testing.T) {
 
 	port := ln.Addr().(*net.TCPAddr).Port
 	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
-	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions")
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions", httptest.NewRecorder(), 0)
 	if err != nil {
 		t.Fatalf("proxyAttempt error: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestProxyAttemptTruncatedBodyIsFail(t *testing.T) {
 
 func TestProxyAttemptInvalidTargetHost(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
-	if _, err := proxyAttempt(req, "bad host", 80, "/v1/completions"); err == nil {
+	if _, err := proxyAttempt(req, "bad host", 80, "/v1/completions", httptest.NewRecorder(), 0); err == nil {
 		t.Fatal("expected parse error for malformed host")
 	}
 }
@@ -171,7 +172,7 @@ func TestProxyAttemptRoundTrip(t *testing.T) {
 	port := extractPort(t, backend.URL)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/chat/completions")
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/chat/completions", httptest.NewRecorder(), 0)
 	if err != nil || res.err != nil {
 		t.Fatalf("attempt failed: proxyAttempt err=%v res.err=%v", err, res.err)
 	}
@@ -218,7 +219,7 @@ func TestProxyAttemptForwardsBody(t *testing.T) {
 	port := extractPort(t, backend.URL)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(payload))
-	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/chat/completions")
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/chat/completions", httptest.NewRecorder(), 0)
 	if err != nil || res.err != nil {
 		t.Fatalf("attempt failed: proxyAttempt err=%v res.err=%v", err, res.err)
 	}
@@ -246,7 +247,7 @@ func TestProxyAttemptForwardsHeaders(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 
-	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/chat/completions")
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/chat/completions", httptest.NewRecorder(), 0)
 	if err != nil || res.err != nil {
 		t.Fatalf("attempt failed: proxyAttempt err=%v res.err=%v", err, res.err)
 	}
@@ -269,7 +270,7 @@ func TestProxyAttemptPathForwarded(t *testing.T) {
 	port := extractPort(t, backend.URL)
 
 	req := httptest.NewRequest("POST", "/v1/completions", nil)
-	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions")
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions", httptest.NewRecorder(), 0)
 	if err != nil || res.err != nil {
 		t.Fatalf("attempt failed: proxyAttempt err=%v res.err=%v", err, res.err)
 	}
@@ -303,5 +304,198 @@ func TestProxyRequest_BodyPreserved(t *testing.T) {
 
 	if string(raw2) != payload {
 		t.Errorf("re-read body mismatch: got %q, want %q", string(raw2), payload)
+	}
+}
+
+func TestAttemptRecorderBuffersUnderLimit(t *testing.T) {
+	rec := httptest.NewRecorder()
+	a := newAttemptRecorder(rec, 16)
+	a.Header().Set("Content-Type", "application/json")
+	a.WriteHeader(200)
+	if _, err := a.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("client received %q before commit", rec.Body.String())
+	}
+	if a.buf.String() != "hello" {
+		t.Errorf("buffer = %q, want %q", a.buf.String(), "hello")
+	}
+	if a.committed {
+		t.Error("committed = true, want false")
+	}
+	if a.passthroughReason != "" {
+		t.Errorf("passthroughReason = %q, want empty", a.passthroughReason)
+	}
+}
+
+func TestAttemptRecorderOverflowCommitsThenPassesThrough(t *testing.T) {
+	rec := httptest.NewRecorder()
+	a := newAttemptRecorder(rec, 8)
+	a.Header().Set("Content-Type", "application/json")
+	a.WriteHeader(200)
+	if _, err := a.Write([]byte("12345")); err != nil {
+		t.Fatalf("first Write error: %v", err)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("client received %q before overflow", rec.Body.String())
+	}
+	if _, err := a.Write([]byte("67890")); err != nil {
+		t.Fatalf("second Write error: %v", err)
+	}
+	if !a.committed {
+		t.Fatal("committed = false, want true after overflow")
+	}
+	if rec.Code != 200 {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != "1234567890" {
+		t.Errorf("body = %q, want %q", rec.Body.String(), "1234567890")
+	}
+	if a.passthroughReason != "size_limit" {
+		t.Errorf("passthroughReason = %q, want %q", a.passthroughReason, "size_limit")
+	}
+	if a.buf.Len() != 0 {
+		t.Errorf("buffer not cleared after commit: %q", a.buf.String())
+	}
+}
+
+func TestAttemptRecorderPassThroughDoesNotBuffer(t *testing.T) {
+	rec := httptest.NewRecorder()
+	a := newAttemptRecorder(rec, 8)
+	a.passThrough = true
+	a.passthroughReason = "content_length"
+	a.WriteHeader(200)
+	if _, err := a.Write([]byte("1234567890")); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	if rec.Body.String() != "1234567890" {
+		t.Errorf("body = %q, want %q", rec.Body.String(), "1234567890")
+	}
+	if a.buf.Len() != 0 {
+		t.Errorf("pass-through must not buffer, got %q", a.buf.String())
+	}
+	if !a.committed {
+		t.Error("committed = false, want true")
+	}
+}
+
+func TestAttemptRecorderUnlimitedNeverCommitsEarly(t *testing.T) {
+	rec := httptest.NewRecorder()
+	a := newAttemptRecorder(rec, 0)
+	a.WriteHeader(200)
+	if _, err := a.Write([]byte(strings.Repeat("z", 1024))); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	if a.committed {
+		t.Error("committed = true, want false with unlimited")
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("client received %q, want nothing until commit", rec.Body.String())
+	}
+}
+
+func TestProxyAttemptOverflowPassesThroughToClient(t *testing.T) {
+	payload := strings.Repeat("x", 100)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		io.WriteString(w, payload)
+	}))
+	defer backend.Close()
+	port := extractPort(t, backend.URL)
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions", rec, 10)
+	if err != nil {
+		t.Fatalf("proxyAttempt error: %v", err)
+	}
+	if res.err != nil {
+		t.Fatalf("res.err = %v, want nil", res.err)
+	}
+	if !res.committed {
+		t.Fatal("committed = false, want true")
+	}
+	if res.body != nil {
+		t.Errorf("res.body = %q, want nil when committed", res.body)
+	}
+	if res.passthroughReason != "size_limit" {
+		t.Errorf("passthroughReason = %q, want size_limit", res.passthroughReason)
+	}
+	if rec.Code != 200 {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != payload {
+		t.Errorf("client body len = %d, want %d", rec.Body.Len(), len(payload))
+	}
+}
+
+func TestProxyAttemptContentLengthFastPath(t *testing.T) {
+	payload := strings.Repeat("y", 100)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, payload)
+	}))
+	defer backend.Close()
+	port := extractPort(t, backend.URL)
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions", rec, 10)
+	if err != nil {
+		t.Fatalf("proxyAttempt error: %v", err)
+	}
+	if !res.committed {
+		t.Fatal("committed = false, want true")
+	}
+	if res.passthroughReason != "content_length" {
+		t.Errorf("passthroughReason = %q, want content_length", res.passthroughReason)
+	}
+	if rec.Body.String() != payload {
+		t.Errorf("client body len = %d, want %d", rec.Body.Len(), len(payload))
+	}
+}
+
+func TestProxyAttemptTruncatedAfterCommitKeepsCommitted(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if req, err := http.ReadRequest(bufio.NewReader(conn)); err == nil {
+			io.Copy(io.Discard, req.Body)
+			req.Body.Close()
+		}
+		io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 100\r\n\r\n"+strings.Repeat("y", 20))
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	res, err := proxyAttempt(req, "127.0.0.1", port, "/v1/completions", rec, 10)
+	if err != nil {
+		t.Fatalf("proxyAttempt error: %v", err)
+	}
+	if !res.committed {
+		t.Fatal("committed = false, want true (20 bytes overflowed limit 10)")
+	}
+	if res.err == nil {
+		t.Fatal("res.err = nil, want truncated-body error")
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatal("client body empty, want the committed bytes")
+	}
+	if rec.Code != 200 {
+		t.Errorf("status = %d, want 200 (already committed)", rec.Code)
 	}
 }
