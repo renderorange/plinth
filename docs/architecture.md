@@ -88,6 +88,7 @@ Prometheus metrics for the gateway:
 - `cluster_nodes_dead` — Gauge for dead node count
 - `gateway_request_duration_seconds` — Histogram for request latency
 - `gateway_requests_total` — Counter for requests by model and status
+- `gateway_response_passthrough_total` — Counter for responses committed early and passed through to the client, labeled by model and reason (`size_limit`, `content_length`)
 
 ### `internal/provision/`
 
@@ -126,7 +127,7 @@ Client → Gateway → Balancer.Select() → Health Monitor
 
 ## Retry and Failover
 
-Each proxy attempt is buffered in memory and committed to the client exactly once, only when an attempt succeeds. Connection-level failures are classified in two tiers and retried on the next node in the pool:
+Each proxy attempt is buffered in memory and committed to the client exactly once, only when an attempt succeeds or the buffered response exceeds `max_buffered_response_bytes`. Connection-level failures are classified in two tiers and retried on the next node in the pool:
 
 - **Tier 1** — Dial failures (connection refused, no route to host). The request provably never reached vLLM, so retrying is safe.
 - **Tier 2** — Timeouts before a response arrives, including the response-header timeout. Retrying carries a small duplicate-generation risk, since the first node may already have started generating.
