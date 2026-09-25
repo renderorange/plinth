@@ -21,10 +21,36 @@ type ClusterConfig struct {
 }
 
 type GatewayConfig struct {
-	Listen              string
-	MetricsListen       string
-	HealthInterval      time.Duration
-	HealthFailThreshold int
+	Listen                   string
+	MetricsListen            string
+	HealthInterval           time.Duration
+	HealthFailThreshold      int
+	MaxBufferedResponseBytes int64
+	MaxRequestBodyBytes      int64
+}
+
+// ResponseBufferLimit returns the effective max buffered upstream response
+// size in bytes. 0 means unlimited, which MaxBufferedResponseBytes expresses
+// as -1.
+func (g GatewayConfig) ResponseBufferLimit() int64 {
+	switch {
+	case g.MaxBufferedResponseBytes == 0:
+		return defaultMaxBufferedResponseBytes
+	case g.MaxBufferedResponseBytes < 0:
+		return 0
+	default:
+		return g.MaxBufferedResponseBytes
+	}
+}
+
+// RequestBodyLimit returns the effective max accepted request body size in
+// bytes. A request body cap is a resource control, so unlike the response
+// buffer there is no unlimited setting: 0 means "use the default".
+func (g GatewayConfig) RequestBodyLimit() int64 {
+	if g.MaxRequestBodyBytes <= 0 {
+		return defaultMaxRequestBodyBytes
+	}
+	return g.MaxRequestBodyBytes
 }
 
 type NodeConfig struct {
@@ -62,6 +88,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.HealthFailThreshold <= 0 {
 		return fmt.Errorf("health_fail_threshold must be greater than zero")
+	}
+	if c.Gateway.MaxBufferedResponseBytes < -1 {
+		return fmt.Errorf("max_buffered_response_bytes must be -1 (unlimited) or non-negative")
+	}
+	if c.Gateway.MaxBufferedResponseBytes == 0 {
+		c.Gateway.MaxBufferedResponseBytes = defaultMaxBufferedResponseBytes
+	}
+	if c.Gateway.MaxRequestBodyBytes < 0 {
+		return fmt.Errorf("max_request_body_bytes must be non-negative (0 uses the default)")
+	}
+	if c.Gateway.MaxRequestBodyBytes == 0 {
+		c.Gateway.MaxRequestBodyBytes = defaultMaxRequestBodyBytes
 	}
 	if len(c.Nodes) == 0 {
 		return fmt.Errorf("at least one node must be configured")

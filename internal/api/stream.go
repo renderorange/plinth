@@ -14,6 +14,12 @@ type commitGate struct {
 	status    int
 	committed bool
 	err       error
+	// writeErr holds a client-side failure of the response write, as opposed
+	// to err, which carries upstream transport and body-read failures. The two
+	// must not share a channel: the handler reports err as an upstream problem
+	// (and can mark the node offline before the first chunk), while a client
+	// that stopped reading is not a node failure.
+	writeErr error
 }
 
 func newCommitGate(rw http.ResponseWriter) *commitGate {
@@ -38,7 +44,11 @@ func (g *commitGate) Write(p []byte) (int, error) {
 	if !g.committed {
 		g.commit()
 	}
-	return g.rw.Write(p)
+	n, err := g.rw.Write(p)
+	if err != nil {
+		g.writeErr = err
+	}
+	return n, err
 }
 
 func (g *commitGate) commit() {

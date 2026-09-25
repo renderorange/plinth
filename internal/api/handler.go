@@ -18,8 +18,6 @@ import (
 	"plinth/internal/metrics"
 )
 
-var maxBodyBytes int64 = 32 << 20
-
 type Handler struct {
 	state   atomic.Pointer[snapshot]
 	bal     *balancer.Balancer
@@ -159,8 +157,9 @@ func (h *Handler) filterByRing(states []health.NodeState, modelName string) []he
 func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path string) {
 	start := time.Now()
 	st := h.state.Load()
+	limit := st.cfg.Gateway.ResponseBufferLimit()
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, st.cfg.Gateway.RequestBodyLimit())
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxErr *http.MaxBytesError
@@ -247,6 +246,17 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 				return
 			}
 			switch {
+			case gate.err == nil && gate.writeErr != nil:
+				// The client stopped reading after the response was committed.
+				// The node delivered a valid response, so this is not a node
+				// failure and must never be retried or replaced with a 502.
+				log.Error("client write failed after commit", "node", node.IP, "error", gate.writeErr.Error())
+				metrics.ClientWriteFailuresTotal.WithLabelValues(modelName).Inc()
+				h.offline.clear(node.IP)
+				metrics.RequestDuration.Observe(time.Since(start).Seconds())
+				metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", gate.status)).Inc()
+				metrics.ProxyAttemptsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", gate.status)).Inc()
+				return
 			case gate.err == nil:
 				if !gate.committed {
 					gate.commit()
@@ -275,7 +285,7 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 			continue
 		}
 
-		res, err := proxyAttempt(r, node.IP, port, path)
+		res, err := proxyAttempt(r, node.IP, port, path, w, limit)
 		if err != nil {
 			http.Error(w, "failed to parse proxy target URL", http.StatusInternalServerError)
 			metrics.RequestDuration.Observe(time.Since(start).Seconds())
@@ -283,10 +293,45 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 			return
 		}
 
+		if res.passthroughReason != "" && res.committed {
+			log.Info("response exceeded buffer limit; passing through", "node", node.IP, "reason", res.passthroughReason, "limit", fmt.Sprintf("%d", limit))
+			metrics.ResponsePassthroughTotal.WithLabelValues(modelName, res.passthroughReason).Inc()
+		}
+
+		if res.committed {
+			status := res.status
+			if status == 0 {
+				status = http.StatusBadGateway
+			}
+			switch {
+			case res.err != nil:
+				log.Error("response truncated after commit", "node", node.IP, "error", res.err.Error())
+			case res.writeErr != nil:
+				// The client stopped reading after the response was committed.
+				// The node delivered a valid response, so this is not a node
+				// failure and must not be retried or replaced with a 502.
+				log.Error("client write failed after commit", "node", node.IP, "error", res.writeErr.Error())
+				metrics.ClientWriteFailuresTotal.WithLabelValues(modelName).Inc()
+				h.offline.clear(node.IP)
+			default:
+				h.offline.clear(node.IP)
+			}
+			metrics.RequestDuration.Observe(time.Since(start).Seconds())
+			metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", status)).Inc()
+			metrics.ProxyAttemptsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", status)).Inc()
+			return
+		}
+
 		switch classifyProxyError(res.err) {
 		case outcomeOK:
 			h.offline.clear(node.IP)
-			commitResponse(w, res)
+			if err := commitResponse(w, res); err != nil {
+				// The client stopped reading after the response was committed.
+				// The node delivered a valid response, so this is not a node
+				// failure and must not be retried or replaced with a 502.
+				log.Error("client write failed after commit", "node", node.IP, "error", err.Error())
+				metrics.ClientWriteFailuresTotal.WithLabelValues(modelName).Inc()
+			}
 			metrics.RequestDuration.Observe(time.Since(start).Seconds())
 			metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", res.status)).Inc()
 			metrics.ProxyAttemptsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", res.status)).Inc()

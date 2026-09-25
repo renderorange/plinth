@@ -110,3 +110,10 @@ func TestProxyAttemptsTotalMetricRegistered(t *testing.T) {
 		t.Errorf("ProxyAttemptsTotal value = %f, want 1", got)
 	}
 }
+
+func TestResponsePassthroughTotalMetricRegistered(t *testing.T) {
+	v := ResponsePassthroughTotal.WithLabelValues("model1", "size_limit")
+	if err := v.Write(&dto.Metric{}); err != nil {
+		t.Fatalf("ResponsePassthroughTotal not registered or not writable: %v", err)
+	}
+}

@@ -101,6 +101,86 @@ name = "node-1"
 			},
 		},
 		{
+			name: "max_buffered_response_bytes parsed and defaulted",
+			toml: `
+[cluster]
+name = "test"
+
+[gateway]
+max_buffered_response_bytes = 4096
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "n1"
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if cfg.Gateway.MaxBufferedResponseBytes != 4096 {
+					t.Errorf("MaxBufferedResponseBytes = %d, want 4096", cfg.Gateway.MaxBufferedResponseBytes)
+				}
+			},
+		},
+		{
+			name: "missing max_buffered_response_bytes uses default",
+			toml: `
+[cluster]
+name = "test"
+
+[gateway]
+health_interval = "5s"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "n1"
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if cfg.Gateway.MaxBufferedResponseBytes != 8<<20 {
+					t.Errorf("MaxBufferedResponseBytes = %d, want default %d", cfg.Gateway.MaxBufferedResponseBytes, 8<<20)
+				}
+			},
+		},
+		{
+			name: "explicit max_request_body_bytes is kept",
+			toml: `
+[cluster]
+name = "test"
+
+[gateway]
+max_request_body_bytes = 4096
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "n1"
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if cfg.Gateway.MaxRequestBodyBytes != 4096 {
+					t.Errorf("MaxRequestBodyBytes = %d, want 4096", cfg.Gateway.MaxRequestBodyBytes)
+				}
+			},
+		},
+		{
+			name: "missing max_request_body_bytes uses default",
+			toml: `
+[cluster]
+name = "test"
+
+[gateway]
+health_interval = "5s"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "n1"
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if cfg.Gateway.MaxRequestBodyBytes != 32<<20 {
+					t.Errorf("MaxRequestBodyBytes = %d, want default %d", cfg.Gateway.MaxRequestBodyBytes, 32<<20)
+				}
+			},
+		},
+		{
 			name: "missing fail threshold uses default",
 			toml: `
 [cluster]

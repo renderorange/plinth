@@ -86,8 +86,12 @@ Prometheus metrics for the gateway:
 - `cluster_nodes_healthy` — Gauge for healthy node count
 - `cluster_nodes_degraded` — Gauge for degraded node count
 - `cluster_nodes_dead` — Gauge for dead node count
+- `gateway_proxy_attempts_total` — Counter for proxy attempts by model and observed status
 - `gateway_request_duration_seconds` — Histogram for request latency
 - `gateway_requests_total` — Counter for requests by model and status
+- `gateway_response_client_write_failures_total` — Counter for committed responses whose write to the client failed, labeled by model
+- `gateway_response_passthrough_total` — Counter for responses committed early and passed through to the client, labeled by model and reason (`size_limit`, `content_length`)
+- `health_check_panics_total` — Counter for health probe panics recovered by the monitor
 
 ### `internal/provision/`
 
@@ -121,15 +125,17 @@ Client → Gateway → Balancer.Select() → Health Monitor
 2. Gateway extracts the model from the request body (applying the configured default when omitted) and picks the routing pool: the model's ring nodes, or the ring-less nodes for non-ring models
 3. Balancer selects a node within that pool based on health state
 4. Gateway reverse-proxies request to selected vLLM instance
-5. Response is buffered and returned to client (no streaming)
+5. Response is buffered up to max_buffered_response_bytes and returned to client; oversized responses are committed early and passed through (no SSE on this path)
 6. Request duration and status are recorded in metrics
 
 ## Retry and Failover
 
-Each proxy attempt is buffered in memory and committed to the client exactly once, only when an attempt succeeds. Connection-level failures are classified in two tiers and retried on the next node in the pool:
+Each proxy attempt is buffered in memory and committed to the client exactly once, only when an attempt succeeds or the buffered response exceeds `max_buffered_response_bytes`. Connection-level failures are classified in two tiers and retried on the next node in the pool:
 
 - **Tier 1** — Dial failures (connection refused, no route to host). The request provably never reached vLLM, so retrying is safe.
 - **Tier 2** — Timeouts before a response arrives, including the response-header timeout. Retrying carries a small duplicate-generation risk, since the first node may already have started generating.
+
+Buffered responses are also a commit gate. While an attempt stays under `max_buffered_response_bytes` nothing reaches the client, so a connection failure can retry the next node. If the response exceeds that limit, the buffered prefix is committed to the client and the remainder is passed through; from that point the attempt is not retried and an upstream failure produces a truncated body rather than a 502.
 
 Nodes with failed attempts are skipped for 10 seconds (offline skip-set), and each failure triggers `Monitor.Recheck` so the node's health is re-checked immediately.
 

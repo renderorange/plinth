@@ -55,6 +55,32 @@ func TestCommitGateWritePassthroughAfterCommit(t *testing.T) {
 	}
 }
 
+// TestCommitGateWriteCapturesTailWriteError covers a client write that fails
+// after the gate has committed. The error must land in writeErr — not err,
+// which is the upstream-error channel — so the handler can log a client-side
+// truncation without misreporting it as an upstream failure.
+func TestCommitGateWriteCapturesTailWriteError(t *testing.T) {
+	w := &failingWriter{ResponseWriter: httptest.NewRecorder(), failAfter: 0}
+	g := newCommitGate(w)
+	g.WriteHeader(http.StatusOK)
+
+	if _, err := g.Write([]byte("chunk")); err == nil {
+		t.Fatal("Write error = nil, want client write failure")
+	}
+	if !g.committed {
+		t.Fatal("committed = false; Write must commit before the body write")
+	}
+	if g.writeErr == nil {
+		t.Fatal("commitGate.writeErr = nil, want the client write failure captured")
+	}
+	if g.writeErr.Error() != "client write failed" {
+		t.Errorf("writeErr = %q, want %q", g.writeErr.Error(), "client write failed")
+	}
+	if g.err != nil {
+		t.Errorf("err = %v, want nil (client write failures must not enter the upstream-error channel)", g.err)
+	}
+}
+
 func TestCommitGateZeroStatusDefaultsTo502(t *testing.T) {
 	rec := httptest.NewRecorder()
 	g := newCommitGate(rec)
