@@ -310,6 +310,10 @@ func TestMonitorGPUFieldsPopulated(t *testing.T) {
 func TestMonitorResetsFailuresOnRecovery(t *testing.T) {
 	failCount := 0
 	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.WriteHeader(http.StatusOK) // model discovery is not the health round
+			return
+		}
 		failCount++
 		if failCount <= 2 {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -824,6 +828,9 @@ func TestStopDrainsInFlightRound(t *testing.T) {
 	release := make(chan struct{})
 	var hits atomic.Int32
 	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			return // model discovery is not the health round
+		}
 		hits.Add(1)
 		<-release
 		w.WriteHeader(http.StatusInternalServerError)
@@ -953,6 +960,9 @@ func TestNewMonitorWithStateEmptyPrevAllHealthy(t *testing.T) {
 func TestStopDoesNotStartNewRound(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			return // model discovery is not the health round
+		}
 		hits.Add(1)
 		time.Sleep(200 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)

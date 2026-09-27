@@ -131,7 +131,8 @@ func (m *Monitor) loop() {
 	ticker := time.NewTicker(m.cfg.Gateway.HealthInterval)
 	defer ticker.Stop()
 
-	m.checkAll() // immediate first check
+	m.discoverAll() // non-blocking
+	m.checkAll()    // immediate first health check (unchanged)
 
 	for {
 		select {
@@ -141,6 +142,7 @@ func (m *Monitor) loop() {
 				return
 			default:
 			}
+			m.discoverAll()
 			m.checkAll()
 		case <-m.stop:
 			return

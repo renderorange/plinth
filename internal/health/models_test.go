@@ -1,10 +1,20 @@
 package health
 
 import (
+	"bytes"
 	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"plinth/internal/config"
 )
 
 func TestApplyResult(t *testing.T) {
@@ -246,4 +256,178 @@ func TestParseModelList(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyModelsResultLogsAndMetrics(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "127.0.0.1", Name: "n1", VLLMPort: 1, Ring: "ring-a"}},
+		Models: config.ModelsConfig{
+			Default: "miss/model",
+			Available: []config.ModelConfig{
+				{Name: "miss/model", Ring: "ring-a"},
+				{Name: "have/model", Ring: "ring-a"},
+			},
+		},
+	}
+	m := NewMonitor(cfg)
+
+	out := captureHealthOutput(t, func() {
+		m.applyModelsResult("127.0.0.1", []string{"have/model"}, nil)
+	})
+	if !strings.Contains(out, "models discovered") {
+		t.Errorf("missing discovery log, got %s", out)
+	}
+	if !strings.Contains(out, "configured model not served by node") {
+		t.Errorf("missing config-mismatch warn, got %s", out)
+	}
+	if !strings.Contains(out, "miss/model") {
+		t.Errorf("mismatch warn should name the model, got %s", out)
+	}
+
+	states := m.GetNodeStates()
+	if states[0].Models.State != ModelsKnown {
+		t.Errorf("State = %v, want known", states[0].Models.State)
+	}
+}
+
+func TestFetchModelsAndDiscoverAll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"object":"list","data":[{"id":"svc/model"}]}`))
+	}))
+	defer srv.Close()
+
+	host, port := hostPort(t, srv.URL)
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: 20 * time.Millisecond, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: host, Name: "n1", VLLMPort: port}},
+	}
+	m := NewMonitor(cfg)
+	m.Start()
+	t.Cleanup(m.Stop)
+
+	waitForCondition(t, 2*time.Second, "node model list discovered", func() bool {
+		states := m.GetNodeStates()
+		return len(states) == 1 && states[0].Models.State == ModelsKnown
+	})
+	states := m.GetNodeStates()
+	if len(states[0].Models.Names) != 1 || states[0].Models.Names[0] != "svc/model" {
+		t.Errorf("Names = %v, want [svc/model]", states[0].Models.Names)
+	}
+}
+
+func TestHungModelFetchDoesNotBlockHealth(t *testing.T) {
+	release := make(chan struct{})
+	models := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			<-release // hang until test ends
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer models.Close()
+	defer close(release)
+
+	host, port := hostPort(t, models.URL)
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: 20 * time.Millisecond, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: host, Name: "n1", VLLMPort: port, MetricsPort: port}},
+	}
+	m := NewMonitor(cfg)
+	m.Start()
+	t.Cleanup(m.Stop)
+
+	// Health (/health 200) must keep updating while /v1/models hangs.
+	var first, second time.Time
+	waitForCondition(t, 2*time.Second, "first health check recorded", func() bool {
+		states := m.GetNodeStates()
+		return len(states) == 1 && !states[0].LastCheck.IsZero()
+	})
+	first = m.GetNodeStates()[0].LastCheck
+	waitForCondition(t, 2*time.Second, "health checks advance", func() bool {
+		st := m.GetNodeStates()[0]
+		return st.LastCheck.After(first)
+	})
+	second = m.GetNodeStates()[0].LastCheck
+	if !second.After(first) {
+		t.Fatalf("LastCheck did not advance: %v -> %v", first, second)
+	}
+}
+
+func TestModelDiscoveryFailureCountsToExpired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health probes must keep succeeding so the Status assertion proves
+		// that model-listing failures alone never touch health state.
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	host, port := hostPort(t, srv.URL)
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: 15 * time.Millisecond, HealthFailThreshold: 2},
+		Nodes:   []config.NodeConfig{{IP: host, Name: "n1", VLLMPort: port}},
+	}
+	m := NewMonitor(cfg)
+	m.Start()
+	t.Cleanup(m.Stop)
+
+	waitForCondition(t, 2*time.Second, "models expired", func() bool {
+		states := m.GetNodeStates()
+		return len(states) == 1 && states[0].Models.State == ModelsExpired
+	})
+	st := m.GetNodeStates()[0]
+	if st.Status != Healthy {
+		t.Errorf("Status = %v, want Healthy (listing must not touch health)", st.Status)
+	}
+	if st.Models.Allows("x") {
+		t.Error("expired node must not allow models")
+	}
+}
+
+// captureHealthOutput captures process stdout around fn (log package writes JSON to stdout).
+// If internal/log exposes captureOutput, prefer copying that pattern here.
+func captureHealthOutput(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string)
+	go func() {
+		var buf bytes.Buffer
+		io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	fn()
+	w.Close()
+	os.Stdout = old
+	return <-done
+}
+
+func hostPort(t *testing.T, rawURL string) (string, int) {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return host, port
 }
