@@ -291,6 +291,54 @@ func TestApplyModelsResultLogsAndMetrics(t *testing.T) {
 	}
 }
 
+func TestApplyModelsResultRingFilteredDefaultDoesNotWarn(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "127.0.0.1", Name: "n1", VLLMPort: 1, Ring: "b"}},
+		Models: config.ModelsConfig{
+			Default: "dflt",
+			Available: []config.ModelConfig{
+				{Name: "dflt", Ring: "a"},
+			},
+		},
+	}
+	m := NewMonitor(cfg)
+
+	out := captureHealthOutput(t, func() {
+		m.applyModelsResult("127.0.0.1", []string{"have/model"}, nil)
+	})
+	if !strings.Contains(out, "node model list changed") {
+		t.Fatalf("warn path did not run, got %s", out)
+	}
+	if strings.Contains(out, "configured model not served by node") {
+		t.Errorf("ring-filtered default must not warn, got %s", out)
+	}
+}
+
+func TestApplyModelsResultDefaultAbsentFromAvailableWarns(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "127.0.0.1", Name: "n1", VLLMPort: 1, Ring: "b"}},
+		Models: config.ModelsConfig{
+			Default: "dflt",
+			Available: []config.ModelConfig{
+				{Name: "other/model", Ring: "a"},
+			},
+		},
+	}
+	m := NewMonitor(cfg)
+
+	out := captureHealthOutput(t, func() {
+		m.applyModelsResult("127.0.0.1", []string{"have/model"}, nil)
+	})
+	if !strings.Contains(out, "configured model not served by node") {
+		t.Errorf("missing config-mismatch warn, got %s", out)
+	}
+	if !strings.Contains(out, "dflt") {
+		t.Errorf("mismatch warn should name the model, got %s", out)
+	}
+}
+
 func TestFetchModelsAndDiscoverAll(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {

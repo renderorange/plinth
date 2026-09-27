@@ -161,7 +161,8 @@ func (m *Monitor) nodeConfigLocked(ip string) config.NodeConfig {
 }
 
 // warnConfigModelsMissing warns once per (node, model) per list change for
-// configured models that should be on this node but are not in names.
+// configured models that should be on this node but are not in names. It also
+// checks models.default when it is not in available.
 func warnConfigModelsMissing(nodeCfg config.NodeConfig, names []string, ip string, cfg *config.Config) {
 	set := make(map[string]bool, len(names))
 	for _, n := range names {
@@ -175,6 +176,7 @@ func warnConfigModelsMissing(nodeCfg config.NodeConfig, names []string, ip strin
 	}
 	seen := make(map[string]bool)
 	for _, am := range cfg.Models.Available {
+		seen[am.Name] = true
 		if am.Ring == "" {
 			if nodeCfg.Ring != "" {
 				continue
@@ -182,7 +184,6 @@ func warnConfigModelsMissing(nodeCfg config.NodeConfig, names []string, ip strin
 		} else if am.Ring != nodeCfg.Ring {
 			continue
 		}
-		seen[am.Name] = true
 		check(am.Name)
 	}
 	if cfg.Models.Default != "" && !seen[cfg.Models.Default] {
