@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
 	"plinth/internal/balancer"
@@ -1872,4 +1873,151 @@ func TestProxyToVLLMStreamingClientWriteFailureNotUpstreamFailure(t *testing.T) 
 	if got := clientWriteFailures(t) - before; got != 1 {
 		t.Errorf("ClientWriteFailuresTotal delta = %v, want 1", got)
 	}
+}
+
+func TestFilterByModelExcludesUnlisted(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+		Models: config.ModelsConfig{
+			Default: "a",
+			Available: []config.ModelConfig{
+				{Name: "a"},
+				{Name: "b"},
+			},
+		},
+	}
+	h := NewHandler(cfg, health.NewMonitor(cfg), balancer.New())
+
+	// Seed discovery state without Start(): known list without "b".
+	// Reach through GetNodeStates-equivalent via the handler snapshot path.
+	st := h.state.Load()
+	_ = st
+	// Direct unit-style check of filterByModel:
+	states := []health.NodeState{
+		{IP: "10.0.0.1", Models: health.ModelDiscovery{State: health.ModelsKnown, Names: []string{"a"}}},
+		{IP: "10.0.0.2", Models: health.ModelDiscovery{State: health.ModelsUntried}},
+	}
+	kept := h.state.Load().filterByModel(states, "b")
+	if len(kept) != 1 || kept[0].IP != "10.0.0.2" {
+		t.Errorf("filterByModel(b) = %+v, want only 10.0.0.2 (untried)", kept)
+	}
+	kept = h.state.Load().filterByModel(states, "a")
+	if len(kept) != 2 {
+		t.Errorf("filterByModel(a) = %+v, want both nodes", kept)
+	}
+}
+
+func TestFilterByModelStateMatrix(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+	}
+	h := NewHandler(cfg, health.NewMonitor(cfg), balancer.New())
+	st := h.state.Load()
+
+	states := []health.NodeState{
+		{IP: "untried", Models: health.ModelDiscovery{State: health.ModelsUntried}},
+		{IP: "known-has", Models: health.ModelDiscovery{State: health.ModelsKnown, Names: []string{"m"}}},
+		{IP: "known-miss", Models: health.ModelDiscovery{State: health.ModelsKnown, Names: []string{"other"}}},
+		{IP: "degraded-has", Models: health.ModelDiscovery{State: health.ModelsDegraded, Names: []string{"m"}}},
+		{IP: "empty", Models: health.ModelDiscovery{State: health.ModelsKnownEmpty}},
+		{IP: "expired", Models: health.ModelDiscovery{State: health.ModelsExpired, Names: []string{"m"}}},
+	}
+	kept := st.filterByModel(states, "m")
+	want := map[string]bool{"untried": true, "known-has": true, "degraded-has": true}
+	if len(kept) != len(want) {
+		t.Fatalf("kept = %+v, want %d nodes", kept, len(want))
+	}
+	for _, s := range kept {
+		if !want[s.IP] {
+			t.Errorf("unexpected kept node %q", s.IP)
+		}
+	}
+}
+
+func TestProxyToVLLMModelFilter503AndCounter(t *testing.T) {
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+		Models: config.ModelsConfig{
+			Default: "a",
+			Available: []config.ModelConfig{
+				{Name: "a"},
+				{Name: "b"},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	h := NewHandler(cfg, mon, balancer.New())
+
+	// Force known-empty via two applyResult empties through a tiny loop:
+	// simulate by calling the unexported path is not possible from api tests.
+	// Instead run one real node that reports no models twice — use httptest.
+	// Simpler deterministic approach: rebuild handler with seeded monitor state
+	// using NewMonitorWithState.
+	seeded := health.NewMonitorWithState(cfg, []health.NodeState{{
+		IP:     "10.0.0.1",
+		Name:   "n1",
+		Status: health.Healthy,
+		Models: health.ModelDiscovery{State: health.ModelsKnown, Names: []string{"a"}},
+	}})
+	h = NewHandler(cfg, seeded, balancer.New())
+
+	before := counterValue(t, metrics.ModelFilterExclusionsTotal, "b", "missing")
+
+	body := `{"model":"b","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "no healthy node available") {
+		t.Errorf("body = %q, want unchanged 503 body", w.Body.String())
+	}
+	after := counterValue(t, metrics.ModelFilterExclusionsTotal, "b", "missing")
+	if after-before < 1 {
+		t.Errorf("gateway_model_filter_exclusions_total{b,missing} delta = %v, want >= 1", after-before)
+	}
+}
+
+func TestProxyToVLLMUntriedFilterIsIdentity(t *testing.T) {
+	// No Start(): every node is untried. A request for an unknown model must
+	// NOT be rejected by the model filter (it may still 503 for other reasons
+	// only if there are no nodes).
+	cfg := &config.Config{
+		Cluster: config.ClusterConfig{Name: "test"},
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 1}},
+		Models: config.ModelsConfig{
+			Default: "a",
+			Available: []config.ModelConfig{
+				{Name: "a"},
+			},
+		},
+	}
+	mon := health.NewMonitor(cfg) // NOT started
+	h := NewHandler(cfg, mon, balancer.New())
+
+	states := h.state.Load().filterByModel(mon.GetNodeStates(), "not/in/config")
+	if len(states) != 1 {
+		t.Fatalf("untried filter dropped nodes: %+v", states)
+	}
+}
+
+// counterValue reads a CounterVec sample sum for the given label values.
+func counterValue(t *testing.T, vec *prometheus.CounterVec, labelValues ...string) float64 {
+	t.Helper()
+	c, err := vec.GetMetricWithLabelValues(labelValues...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &dto.Metric{}
+	if err := c.Write(m); err != nil {
+		t.Fatal(err)
+	}
+	return m.GetCounter().GetValue()
 }

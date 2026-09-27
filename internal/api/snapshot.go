@@ -53,6 +53,18 @@ func (s *snapshot) filterByRing(states []health.NodeState, modelName string) []h
 	return filtered
 }
 
+// filterByModel drops nodes whose discovery state forbids modelName.
+// Exact id match. Untried nodes are kept (identity).
+func (s *snapshot) filterByModel(states []health.NodeState, modelName string) []health.NodeState {
+	var filtered []health.NodeState
+	for _, st := range states {
+		if st.Models.Allows(modelName) {
+			filtered = append(filtered, st)
+		}
+	}
+	return filtered
+}
+
 func (s *snapshot) portForNode(ip string) (int, bool) {
 	for _, nc := range s.cfg.Nodes {
 		if nc.IP == ip {

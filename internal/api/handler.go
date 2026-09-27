@@ -198,7 +198,20 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 
 	states := st.mon.GetNodeStates()
 	filtered := st.filterByRing(states, modelName)
+	preLen := len(filtered)
+	kept := make([]health.NodeState, 0, len(filtered))
+	for _, s := range filtered {
+		if s.Models.Allows(modelName) {
+			kept = append(kept, s)
+			continue
+		}
+		metrics.ModelFilterExclusionsTotal.WithLabelValues(modelName, s.Models.ExclusionReason(modelName)).Inc()
+	}
+	filtered = kept
 	if len(filtered) == 0 {
+		if preLen > 0 {
+			log.Warn("no node serves requested model", "model", modelName)
+		}
 		http.Error(w, "no healthy node available", http.StatusServiceUnavailable)
 		metrics.RequestDuration.Observe(time.Since(start).Seconds())
 		metrics.RequestsTotal.WithLabelValues(modelName, "503").Inc()
