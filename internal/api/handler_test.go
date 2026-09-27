@@ -2021,3 +2021,134 @@ func counterValue(t *testing.T, vec *prometheus.CounterVec, labelValues ...strin
 	}
 	return m.GetCounter().GetValue()
 }
+
+func TestHealthEndpointModelDetails(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000},
+			{IP: "10.0.0.2", Name: "n2", VLLMPort: 8000},
+		},
+	}
+	mon := health.NewMonitorWithState(cfg, []health.NodeState{
+		{
+			IP:     "10.0.0.1",
+			Name:   "n1",
+			Status: health.Healthy,
+			Models: health.ModelDiscovery{
+				State:     health.ModelsKnown,
+				Names:     []string{"a"},
+				FetchedAt: time.Now().Add(-2 * time.Second),
+			},
+		},
+		{
+			IP:     "10.0.0.2",
+			Name:   "n2",
+			Status: health.Healthy,
+			Models: health.ModelDiscovery{State: health.ModelsExpired, LastError: "down"},
+		},
+	})
+	cfg2 := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{
+			{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000},
+			{IP: "10.0.0.2", Name: "n2", VLLMPort: 8000},
+		},
+	}
+	mon = health.NewMonitorWithState(cfg2, mon.GetNodeStates())
+	h := NewHandler(cfg2, mon, balancer.New())
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp struct {
+		Status   string `json:"status"`
+		Nodes    int    `json:"nodes"`
+		Healthy  int    `json:"healthy"`
+		ModelsOK int    `json:"models_ok"`
+		Details  []struct {
+			IP     string `json:"ip"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			Models struct {
+				State      string   `json:"state"`
+				Names      []string `json:"names"`
+				AgeSeconds *float64 `json:"age_seconds"`
+				Fails      int      `json:"fails"`
+				LastError  string   `json:"last_error"`
+			} `json:"models"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	// Existing fields must remain (and status is health-only).
+	if resp.Nodes != 2 || resp.Healthy != 2 {
+		t.Errorf("nodes/healthy = %d/%d, want 2/2", resp.Nodes, resp.Healthy)
+	}
+	if resp.Status != "ok" {
+		t.Errorf("status = %q, want ok (model state must not affect it)", resp.Status)
+	}
+	if resp.ModelsOK != 1 {
+		t.Errorf("models_ok = %d, want 1", resp.ModelsOK)
+	}
+	if len(resp.Details) != 2 {
+		t.Fatalf("details = %d, want 2", len(resp.Details))
+	}
+
+	var known, expired *bool
+	_ = known
+	_ = expired
+	for _, d := range resp.Details {
+		switch d.IP {
+		case "10.0.0.1":
+			if d.Models.State != "known" {
+				t.Errorf("n1 state = %q, want known", d.Models.State)
+			}
+			if len(d.Models.Names) != 1 || d.Models.Names[0] != "a" {
+				t.Errorf("n1 names = %v, want [a]", d.Models.Names)
+			}
+			if d.Models.AgeSeconds == nil {
+				t.Error("n1 age_seconds nil, want number")
+			}
+		case "10.0.0.2":
+			if d.Models.State != "expired" {
+				t.Errorf("n2 state = %q, want expired", d.Models.State)
+			}
+			if d.Models.Names != nil {
+				t.Errorf("n2 names = %v, want null/nil", d.Models.Names)
+			}
+			if d.Models.AgeSeconds != nil {
+				t.Error("n2 age_seconds set, want null")
+			}
+			if d.Models.LastError != "down" {
+				t.Errorf("n2 last_error = %q, want down", d.Models.LastError)
+			}
+		}
+	}
+}
+
+func TestHealthEndpointLegacyFieldsUnchanged(t *testing.T) {
+	h := newTestHandler()
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	for _, key := range []string{"status", "nodes", "healthy"} {
+		if _, ok := resp[key]; !ok {
+			t.Errorf("missing legacy field %q", key)
+		}
+	}
+	if _, ok := resp["models_ok"]; !ok {
+		t.Error("missing models_ok")
+	}
+	if _, ok := resp["details"]; !ok {
+		t.Error("missing details")
+	}
+}
