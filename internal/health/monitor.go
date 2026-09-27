@@ -16,14 +16,15 @@ import (
 )
 
 type Monitor struct {
-	cfg      *config.Config
-	client   *http.Client
-	nodes    map[string]*NodeState
-	checking map[string]bool
-	mu       sync.RWMutex
-	stop     chan struct{}
-	done     chan struct{}
-	stopOnce sync.Once
+	cfg            *config.Config
+	client         *http.Client
+	nodes          map[string]*NodeState
+	checking       map[string]bool
+	modelsChecking map[string]bool
+	mu             sync.RWMutex
+	stop           chan struct{}
+	done           chan struct{}
+	stopOnce       sync.Once
 }
 
 func NewMonitor(cfg *config.Config) *Monitor {
@@ -33,6 +34,7 @@ func NewMonitor(cfg *config.Config) *Monitor {
 			IP:     n.IP,
 			Name:   n.Name,
 			Status: Healthy,
+			Models: ModelDiscovery{State: ModelsUntried},
 		}
 	}
 	return &Monitor{
@@ -40,18 +42,20 @@ func NewMonitor(cfg *config.Config) *Monitor {
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		nodes:    nodes,
-		checking: make(map[string]bool),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		nodes:          nodes,
+		checking:       make(map[string]bool),
+		modelsChecking: make(map[string]bool),
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 }
 
-// NewMonitorWithState builds a monitor like NewMonitor but seeds health state
-// for IPs present in both the new config and prev: Status and
-// ConsecutiveFailures carry over so a reload does not give flapping nodes a
-// clean slate. Nodes not present in prev start Healthy, matching startup
-// semantics.
+// NewMonitorWithState builds a monitor like NewMonitor but seeds state for IPs
+// present in both the new config and prev: Status, ConsecutiveFailures, and
+// Models carry over so a reload does not give flapping nodes a clean slate.
+// Models.Names is deep-copied so the new monitor never shares a backing array
+// with prev. Nodes not present in prev start Healthy and untried, matching
+// startup semantics.
 func NewMonitorWithState(cfg *config.Config, prev []NodeState) *Monitor {
 	m := NewMonitor(cfg)
 	prevByIP := make(map[string]NodeState, len(prev))
@@ -62,6 +66,10 @@ func NewMonitorWithState(cfg *config.Config, prev []NodeState) *Monitor {
 		if old, ok := prevByIP[ip]; ok {
 			n.Status = old.Status
 			n.ConsecutiveFailures = old.ConsecutiveFailures
+			n.Models = old.Models
+			if old.Models.Names != nil {
+				n.Models.Names = append([]string(nil), old.Models.Names...)
+			}
 		}
 	}
 	return m
@@ -86,7 +94,11 @@ func (m *Monitor) GetNodeStates() []NodeState {
 	defer m.mu.RUnlock()
 	states := make([]NodeState, 0, len(m.nodes))
 	for _, n := range m.nodes {
-		states = append(states, *n)
+		st := *n
+		if n.Models.Names != nil {
+			st.Models.Names = append([]string(nil), n.Models.Names...)
+		}
+		states = append(states, st)
 	}
 	sort.Slice(states, func(i, j int) bool {
 		return states[i].IP < states[j].IP
@@ -217,6 +229,22 @@ func (m *Monitor) finish(ip string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.checking, ip)
+}
+
+func (m *Monitor) tryStartModels(ip string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.modelsChecking[ip] {
+		return false
+	}
+	m.modelsChecking[ip] = true
+	return true
+}
+
+func (m *Monitor) finishModels(ip string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.modelsChecking, ip)
 }
 
 type gpuMetricsRaw struct {

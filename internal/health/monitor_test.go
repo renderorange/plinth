@@ -992,3 +992,132 @@ func TestStopIsIdempotent(t *testing.T) {
 	mon.Stop()
 	mon.Stop()
 }
+
+func TestNewMonitorNodesStartUntried(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+	}
+	m := NewMonitor(cfg)
+	states := m.GetNodeStates()
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if states[0].Models.State != ModelsUntried {
+		t.Errorf("State = %v, want ModelsUntried", states[0].Models.State)
+	}
+	if !states[0].Models.Allows("anything") {
+		t.Error("untried node must allow all models")
+	}
+}
+
+func TestGetNodeStatesDeepCopiesModelNames(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+	}
+	m := NewMonitor(cfg)
+	m.mu.Lock()
+	m.nodes["10.0.0.1"].Models = ModelDiscovery{
+		State: ModelsKnown,
+		Names: []string{"a", "b"},
+	}
+	m.mu.Unlock()
+
+	states := m.GetNodeStates()
+	if len(states) != 1 || len(states[0].Models.Names) != 2 {
+		t.Fatalf("states = %+v", states)
+	}
+	states[0].Models.Names[0] = "MUTATED"
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.nodes["10.0.0.1"].Models.Names[0] != "a" {
+		t.Errorf("source Names[0] = %q, want \"a\" (deep copy failed)", m.nodes["10.0.0.1"].Models.Names[0])
+	}
+}
+
+func TestNewMonitorWithStateCarriesModels(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+	}
+	prev := []NodeState{{
+		IP:     "10.0.0.1",
+		Name:   "n1",
+		Status: Healthy,
+		Models: ModelDiscovery{
+			State:     ModelsDegraded,
+			Names:     []string{"a"},
+			FetchedAt: time.Now(),
+			Fails:     2,
+			Empties:   1,
+			LastError: "old",
+		},
+	}}
+	m := NewMonitorWithState(cfg, prev)
+	states := m.GetNodeStates()
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	md := states[0].Models
+	if md.State != ModelsDegraded || md.Fails != 2 || md.Empties != 1 || md.LastError != "old" {
+		t.Errorf("Models = %+v, want degraded/fails=2/empties=1/LastError=old", md)
+	}
+	if len(md.Names) != 1 || md.Names[0] != "a" {
+		t.Errorf("Names = %v, want [a]", md.Names)
+	}
+	if md.FetchedAt.IsZero() {
+		t.Error("FetchedAt not carried")
+	}
+
+	// Deep copy on carryover: mutating the new node must not touch prev.
+	states[0].Models.Names[0] = "MUTATED"
+	if prev[0].Models.Names[0] != "a" {
+		t.Errorf("prev Names[0] = %q, want \"a\"", prev[0].Models.Names[0])
+	}
+
+	// The snapshot mutation above cannot see carryover aliasing: GetNodeStates
+	// already deep-copies, so that assert passes even if the monitor's live
+	// Names share prev's backing array. Mutate the live node for real teeth.
+	m.mu.Lock()
+	m.nodes["10.0.0.1"].Models.Names[0] = "MUTATED-LIVE"
+	m.mu.Unlock()
+	if prev[0].Models.Names[0] != "a" {
+		t.Errorf("prev Names[0] = %q, want \"a\" after live mutation (carryover deep copy failed)", prev[0].Models.Names[0])
+	}
+}
+
+func TestNewMonitorWithStateFreshNodeStaysUntried(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.2", Name: "n2", VLLMPort: 8000}},
+	}
+	prev := []NodeState{{IP: "10.0.0.1", Models: ModelDiscovery{State: ModelsKnown, Names: []string{"a"}}}}
+	m := NewMonitorWithState(cfg, prev)
+	states := m.GetNodeStates()
+	if states[0].Models.State != ModelsUntried {
+		t.Errorf("fresh node State = %v, want ModelsUntried", states[0].Models.State)
+	}
+}
+
+func TestTryStartModelsIndependentOfChecking(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+	}
+	m := NewMonitor(cfg)
+	if !m.tryStart("10.0.0.1") {
+		t.Fatal("tryStart failed")
+	}
+	if !m.tryStartModels("10.0.0.1") {
+		t.Fatal("tryStartModels must not be blocked by health checking")
+	}
+	if m.tryStartModels("10.0.0.1") {
+		t.Fatal("second tryStartModels must fail")
+	}
+	m.finishModels("10.0.0.1")
+	if !m.tryStartModels("10.0.0.1") {
+		t.Fatal("tryStartModels after finishModels")
+	}
+}
