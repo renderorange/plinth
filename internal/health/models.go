@@ -1,6 +1,10 @@
 package health
 
-import "time"
+import (
+	"encoding/json"
+	"io"
+	"time"
+)
 
 // applyResult folds one fetch outcome into d. failThreshold is
 // Gateway.HealthFailThreshold (N). Returns true when Names contents changed.
@@ -61,4 +65,24 @@ func stringSlicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+type modelsResponse struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+// parseModelList extracts data[].id from a vLLM GET /v1/models body.
+// A valid empty list returns a non-nil empty slice and nil error.
+func parseModelList(r io.Reader) ([]string, error) {
+	var resp modelsResponse
+	if err := json.NewDecoder(r).Decode(&resp); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(resp.Data))
+	for _, d := range resp.Data {
+		names = append(names, d.ID)
+	}
+	return names, nil
 }

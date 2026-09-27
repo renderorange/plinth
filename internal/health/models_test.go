@@ -2,6 +2,7 @@ package health
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -175,6 +176,58 @@ func TestApplyResult(t *testing.T) {
 				}
 			} else if d.LastError != "" {
 				t.Errorf("LastError = %q after success, want empty", d.LastError)
+			}
+		})
+	}
+}
+
+func TestParseModelList(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		want    []string
+		wantErr bool
+	}{
+		{
+			name: "ids extracted",
+			body: `{"object":"list","data":[{"id":"a","object":"model"},{"id":"b"}]}`,
+			want: []string{"a", "b"},
+		},
+		{
+			name: "empty data",
+			body: `{"object":"list","data":[]}`,
+			want: []string{},
+		},
+		{
+			name:    "bad json",
+			body:    `{not json`,
+			wantErr: true,
+		},
+		{
+			name:    "wrong shape",
+			body:    `{"data":"nope"}`,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseModelList(strings.NewReader(tt.body))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("err = nil, want error (got %v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("got %v, want %v", got, tt.want)
+				}
 			}
 		})
 	}
