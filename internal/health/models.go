@@ -2,6 +2,7 @@ package health
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"time"
 )
@@ -74,11 +75,15 @@ type modelsResponse struct {
 }
 
 // parseModelList extracts data[].id from a vLLM GET /v1/models body.
-// A valid empty list returns a non-nil empty slice and nil error.
+// A valid empty list (data: []) returns a non-nil empty slice and nil error.
+// A body without a data array (missing, null, or a non-array) is an error.
 func parseModelList(r io.Reader) ([]string, error) {
 	var resp modelsResponse
 	if err := json.NewDecoder(r).Decode(&resp); err != nil {
 		return nil, err
+	}
+	if resp.Data == nil {
+		return nil, fmt.Errorf("parse model list: missing data field")
 	}
 	names := make([]string, 0, len(resp.Data))
 	for _, d := range resp.Data {

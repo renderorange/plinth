@@ -208,6 +208,21 @@ func TestParseModelList(t *testing.T) {
 			body:    `{"data":"nope"}`,
 			wantErr: true,
 		},
+		{
+			name:    "missing data field",
+			body:    `{"error":{"message":"boom"}}`,
+			wantErr: true,
+		},
+		{
+			name:    "null body",
+			body:    `null`,
+			wantErr: true,
+		},
+		{
+			name:    "empty object",
+			body:    `{}`,
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
