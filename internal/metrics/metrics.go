@@ -42,6 +42,18 @@ var (
 		Name: "health_check_panics_total",
 		Help: "Total health probe panics recovered by the monitor",
 	})
+	ModelFilterExclusionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_model_filter_exclusions_total",
+		Help: "Nodes dropped from the candidate pool by the model filter",
+	}, []string{"model", "reason"})
+	NodeModelsOK = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "gateway_node_models_ok",
+		Help: "1 when node model discovery is settled (known or known_empty)",
+	}, []string{"node"})
+	ModelDiscoveryTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_model_discovery_total",
+		Help: "Model discovery fetch results by node",
+	}, []string{"node", "result"})
 )
 
 func init() {
@@ -54,4 +66,7 @@ func init() {
 	prometheus.MustRegister(ResponsePassthroughTotal)
 	prometheus.MustRegister(ClientWriteFailuresTotal)
 	prometheus.MustRegister(HealthCheckPanicsTotal)
+	prometheus.MustRegister(ModelFilterExclusionsTotal)
+	prometheus.MustRegister(NodeModelsOK)
+	prometheus.MustRegister(ModelDiscoveryTotal)
 }

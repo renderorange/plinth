@@ -18,15 +18,26 @@ Returns cluster health status.
 {
   "status": "ok",
   "nodes": 3,
-  "healthy": 2
+  "healthy": 2,
+  "models_ok": 2,
+  "details": [
+    {"ip": "10.0.0.1", "name": "gpu-node-1", "status": "healthy", "models": {"state": "known", "names": ["Qwen/Qwen2.5-7B-Instruct", "Qwen/Qwen2.5-32B-Instruct-Q4"], "age_seconds": 12.4, "fails": 0, "last_error": ""}}
+  ]
 }
 ```
 
 | Field | Type | Description |
-|-------|------|-------------|
-| `status` | string | `"ok"` (all nodes healthy), `"degraded"` (some unhealthy), or `"error"` (no healthy nodes) |
-| `nodes` | int | Total number of configured nodes |
-| `healthy` | int | Number of healthy nodes |
+|------|------|-------------|
+| `status` | string | `ok` / `degraded` / `error` — health only (unchanged) |
+| `nodes` | int | node count (unchanged) |
+| `healthy` | int | healthy count (unchanged) |
+| `models_ok` | int | nodes whose model discovery is `known` or `known_empty` |
+| `details` | array | per-node status + `models` object |
+| `details[].models.state` | string | `untried` / `known` / `known_empty` / `degraded` / `expired` |
+| `details[].models.names` | array\|null | last-known-good model ids |
+| `details[].models.age_seconds` | number\|null | seconds since last successful fetch |
+| `details[].models.fails` | int | consecutive listing failures |
+| `details[].models.last_error` | string | last listing error text |
 
 ### List Models
 
@@ -133,6 +144,9 @@ Returns Prometheus metrics for the gateway.
 | `gateway_proxy_attempts_total` | Counter | Proxy attempts by model and observed status |
 | `gateway_response_client_write_failures_total` | Counter | Committed responses whose write to the client failed |
 | `gateway_response_passthrough_total` | Counter | Responses committed early and passed through to the client |
+| `gateway_model_filter_exclusions_total` | Counter | Nodes dropped from the candidate pool by the model filter (`model`, `reason`) |
+| `gateway_node_models_ok` | Gauge | Per-node model discovery settled flag (`node`) |
+| `gateway_model_discovery_total` | Counter | Model discovery fetch results (`node`, `result`) |
 | `health_check_panics_total` | Counter | Total health probe panics recovered by the monitor |
 
 **Labels for `gateway_requests_total`:**

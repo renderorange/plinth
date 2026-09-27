@@ -3,6 +3,7 @@ package metrics
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
 
@@ -115,5 +116,31 @@ func TestResponsePassthroughTotalMetricRegistered(t *testing.T) {
 	v := ResponsePassthroughTotal.WithLabelValues("model1", "size_limit")
 	if err := v.Write(&dto.Metric{}); err != nil {
 		t.Fatalf("ResponsePassthroughTotal not registered or not writable: %v", err)
+	}
+}
+
+func TestModelMetricsRegistered(t *testing.T) {
+	ModelFilterExclusionsTotal.WithLabelValues("test/model", "missing")
+	NodeModelsOK.WithLabelValues("127.0.0.1")
+	ModelDiscoveryTotal.WithLabelValues("127.0.0.1", "success")
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"gateway_model_filter_exclusions_total": false,
+		"gateway_node_models_ok":                false,
+		"gateway_model_discovery_total":         false,
+	}
+	for _, mf := range mfs {
+		name := mf.GetName()
+		if _, ok := want[name]; ok {
+			want[name] = true
+		}
+	}
+	for name, seen := range want {
+		if !seen {
+			t.Errorf("metric %q not registered", name)
+		}
 	}
 }

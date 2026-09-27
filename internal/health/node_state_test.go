@@ -93,3 +93,96 @@ func TestNodeStateGPUsField(t *testing.T) {
 		t.Errorf("expected GPU-bbb, got %s", node.GPUs[1].UUID)
 	}
 }
+
+func TestModelDiscoveryAllows(t *testing.T) {
+	tests := []struct {
+		name  string
+		state ModelState
+		names []string
+		model string
+		want  bool
+	}{
+		{"untried allows anything", ModelsUntried, nil, "any/model", true},
+		{"known allows listed", ModelsKnown, []string{"a", "b"}, "a", true},
+		{"known rejects unlisted", ModelsKnown, []string{"a", "b"}, "c", false},
+		{"known empty names rejects", ModelsKnown, nil, "a", false},
+		{"degraded allows last-known-good", ModelsDegraded, []string{"a"}, "a", true},
+		{"degraded rejects unlisted", ModelsDegraded, []string{"a"}, "b", false},
+		{"known_empty rejects all", ModelsKnownEmpty, nil, "a", false},
+		{"expired rejects all", ModelsExpired, []string{"a"}, "a", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := ModelDiscovery{State: tt.state, Names: tt.names}
+			if got := d.Allows(tt.model); got != tt.want {
+				t.Errorf("Allows(%q) = %v, want %v (state=%s)", tt.model, got, tt.want, tt.state)
+			}
+		})
+	}
+}
+
+func TestModelDiscoveryExclusionReason(t *testing.T) {
+	tests := []struct {
+		name  string
+		state ModelState
+		names []string
+		model string
+		want  string
+	}{
+		{"untried never excludes", ModelsUntried, nil, "a", ""},
+		{"allows returns empty reason", ModelsKnown, []string{"a"}, "a", ""},
+		{"known missing", ModelsKnown, []string{"a"}, "b", "missing"},
+		{"degraded missing", ModelsDegraded, []string{"a"}, "b", "missing"},
+		{"known_empty", ModelsKnownEmpty, nil, "a", "empty"},
+		{"expired", ModelsExpired, nil, "a", "expired"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := ModelDiscovery{State: tt.state, Names: tt.names}
+			if got := d.ExclusionReason(tt.model); got != tt.want {
+				t.Errorf("ExclusionReason(%q) = %q, want %q", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestModelDiscoveryAge(t *testing.T) {
+	now := time.Now()
+	d := ModelDiscovery{}
+	if got := d.Age(now); got != 0 {
+		t.Errorf("Age with zero FetchedAt = %v, want 0", got)
+	}
+	d.FetchedAt = now.Add(-2 * time.Second)
+	got := d.Age(now)
+	if got < time.Second || got > 3*time.Second {
+		t.Errorf("Age = %v, want ~2s", got)
+	}
+}
+
+func TestModelStateString(t *testing.T) {
+	tests := []struct {
+		state ModelState
+		want  string
+	}{
+		{ModelsUntried, "untried"},
+		{ModelsKnown, "known"},
+		{ModelsKnownEmpty, "known_empty"},
+		{ModelsDegraded, "degraded"},
+		{ModelsExpired, "expired"},
+		{ModelState(99), "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.state.String(); got != tt.want {
+				t.Errorf("String() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNodeStateHasModels(t *testing.T) {
+	n := NodeState{IP: "10.0.0.1", Status: Healthy}
+	if n.Models.State != ModelsUntried {
+		t.Errorf("zero NodeState Models.State = %v, want ModelsUntried", n.Models.State)
+	}
+}

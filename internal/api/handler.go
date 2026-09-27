@@ -94,12 +94,49 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	type modelsView struct {
+		State      string   `json:"state"`
+		Names      []string `json:"names"`
+		AgeSeconds *float64 `json:"age_seconds"`
+		Fails      int      `json:"fails"`
+		LastError  string   `json:"last_error"`
+	}
+	type nodeView struct {
+		IP     string     `json:"ip"`
+		Name   string     `json:"name"`
+		Status string     `json:"status"`
+		Models modelsView `json:"models"`
+	}
+
 	states := h.state.Load().mon.GetNodeStates()
 	healthy := 0
+	modelsOK := 0
+	details := make([]nodeView, 0, len(states))
+	now := time.Now()
 	for _, s := range states {
 		if s.Status == health.Healthy {
 			healthy++
 		}
+		md := s.Models
+		if md.State == health.ModelsKnown || md.State == health.ModelsKnownEmpty {
+			modelsOK++
+		}
+		mv := modelsView{
+			State:     md.State.String(),
+			Names:     md.Names,
+			Fails:     md.Fails,
+			LastError: md.LastError,
+		}
+		if !md.FetchedAt.IsZero() {
+			age := md.Age(now).Seconds()
+			mv.AgeSeconds = &age
+		}
+		details = append(details, nodeView{
+			IP:     s.IP,
+			Name:   s.Name,
+			Status: s.Status.String(),
+			Models: mv,
+		})
 	}
 	status := "ok"
 	if healthy == 0 {
@@ -109,9 +146,11 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  status,
-		"nodes":   len(states),
-		"healthy": healthy,
+		"status":    status,
+		"nodes":     len(states),
+		"healthy":   healthy,
+		"models_ok": modelsOK,
+		"details":   details,
 	})
 }
 
@@ -198,7 +237,20 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 
 	states := st.mon.GetNodeStates()
 	filtered := st.filterByRing(states, modelName)
+	preLen := len(filtered)
+	kept := make([]health.NodeState, 0, len(filtered))
+	for _, s := range filtered {
+		if s.Models.Allows(modelName) {
+			kept = append(kept, s)
+			continue
+		}
+		metrics.ModelFilterExclusionsTotal.WithLabelValues(modelName, s.Models.ExclusionReason(modelName)).Inc()
+	}
+	filtered = kept
 	if len(filtered) == 0 {
+		if preLen > 0 {
+			log.Warn("no node serves requested model", "model", modelName)
+		}
 		http.Error(w, "no healthy node available", http.StatusServiceUnavailable)
 		metrics.RequestDuration.Observe(time.Since(start).Seconds())
 		metrics.RequestsTotal.WithLabelValues(modelName, "503").Inc()
