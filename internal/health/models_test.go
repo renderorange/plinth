@@ -339,6 +339,75 @@ func TestApplyModelsResultDefaultAbsentFromAvailableWarns(t *testing.T) {
 	}
 }
 
+func TestApplyModelsResultTransitionLogs(t *testing.T) {
+	fetchFail := errors.New("fetch failed")
+	newMonitor := func(threshold int) *Monitor {
+		cfg := &config.Config{
+			Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: threshold},
+			Nodes:   []config.NodeConfig{{IP: "127.0.0.1", Name: "n1", VLLMPort: 1}},
+		}
+		return NewMonitor(cfg)
+	}
+
+	t.Run("untried_to_known", func(t *testing.T) {
+		m := newMonitor(3)
+		out := captureHealthOutput(t, func() {
+			m.applyModelsResult("127.0.0.1", []string{"have/model"}, nil)
+		})
+		if !strings.Contains(out, "models discovered") {
+			t.Errorf("missing models discovered, got %s", out)
+		}
+		if strings.Contains(out, "model discovery recovered") {
+			t.Errorf("untried->known must not log recovered, got %s", out)
+		}
+	})
+
+	t.Run("degraded_to_known", func(t *testing.T) {
+		m := newMonitor(3)
+		m.applyModelsResult("127.0.0.1", []string{"have/model"}, nil) // untried -> known
+		m.applyModelsResult("127.0.0.1", nil, fetchFail)              // known -> degraded
+		out := captureHealthOutput(t, func() {
+			m.applyModelsResult("127.0.0.1", []string{"have/model"}, nil) // degraded -> known
+		})
+		if !strings.Contains(out, "model discovery recovered") {
+			t.Errorf("missing model discovery recovered, got %s", out)
+		}
+		if strings.Contains(out, "models discovered") {
+			t.Errorf("degraded->known must not log models discovered, got %s", out)
+		}
+	})
+
+	t.Run("expired_to_known", func(t *testing.T) {
+		m := newMonitor(2)
+		m.applyModelsResult("127.0.0.1", nil, fetchFail) // untried, fails 1
+		m.applyModelsResult("127.0.0.1", nil, fetchFail) // expired, fails 2
+		out := captureHealthOutput(t, func() {
+			m.applyModelsResult("127.0.0.1", []string{"have/model"}, nil) // expired -> known
+		})
+		if !strings.Contains(out, "model discovery recovered") {
+			t.Errorf("missing model discovery recovered, got %s", out)
+		}
+		if strings.Contains(out, "models discovered") {
+			t.Errorf("expired->known must not log models discovered, got %s", out)
+		}
+	})
+
+	t.Run("known_empty_to_known", func(t *testing.T) {
+		m := newMonitor(3)
+		m.applyModelsResult("127.0.0.1", nil, nil) // untried, empties 1
+		m.applyModelsResult("127.0.0.1", nil, nil) // known_empty, empties 2
+		out := captureHealthOutput(t, func() {
+			m.applyModelsResult("127.0.0.1", []string{"have/model"}, nil) // known_empty -> known
+		})
+		if !strings.Contains(out, "model discovery recovered") {
+			t.Errorf("missing model discovery recovered, got %s", out)
+		}
+		if strings.Contains(out, "models discovered") {
+			t.Errorf("known_empty->known must not log models discovered, got %s", out)
+		}
+	})
+}
+
 func TestFetchModelsAndDiscoverAll(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {

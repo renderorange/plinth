@@ -130,18 +130,17 @@ func (m *Monitor) applyModelsResult(ip string, names []string, fetchErr error) {
 	}
 
 	if next.State != prev.State {
-		switch next.State {
-		case ModelsKnown:
+		switch {
+		case next.State == ModelsKnown && prev.State == ModelsUntried:
 			log.Info("models discovered", "node", ip)
-		case ModelsKnownEmpty:
-			log.Warn("node reports no models", "node", ip)
-		case ModelsDegraded:
-			log.Warn("model discovery failed", "node", ip, "error", next.LastError)
-		case ModelsExpired:
-			log.Error("model discovery expired", "node", ip, "error", next.LastError)
-		}
-		if prev.State == ModelsDegraded && next.State == ModelsKnown {
+		case next.State == ModelsKnown:
 			log.Info("model discovery recovered", "node", ip)
+		case next.State == ModelsKnownEmpty:
+			log.Warn("node reports no models", "node", ip)
+		case next.State == ModelsDegraded:
+			log.Warn("model discovery failed", "node", ip, "error", next.LastError)
+		case next.State == ModelsExpired:
+			log.Error("model discovery expired", "node", ip, "error", next.LastError)
 		}
 	}
 	if changed {
