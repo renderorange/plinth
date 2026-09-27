@@ -18,7 +18,11 @@ Returns cluster health status.
 {
   "status": "ok",
   "nodes": 3,
-  "healthy": 2
+  "healthy": 2,
+  "models_ok": 2,
+  "details": [
+    {"ip": "10.0.0.1", "name": "gpu-node-1", "status": "healthy", "models": {"state": "known", "names": ["Qwen/Qwen2.5-7B-Instruct", "Qwen/Qwen2.5-32B-Instruct-Q4"], "age_seconds": 12.4, "fails": 0, "last_error": ""}}
+  ]
 }
 ```
 
