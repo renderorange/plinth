@@ -86,6 +86,9 @@ Prometheus metrics for the gateway:
 - `cluster_nodes_healthy` — Gauge for healthy node count
 - `cluster_nodes_degraded` — Gauge for degraded node count
 - `cluster_nodes_dead` — Gauge for dead node count
+- `gateway_model_discovery_total` — Counter for model discovery fetch results (`node`, `result`)
+- `gateway_model_filter_exclusions_total` — Counter for nodes dropped from the candidate pool by the model filter (`model`, `reason`)
+- `gateway_node_models_ok` — Gauge for per-node model discovery settled flag (`node`)
 - `gateway_proxy_attempts_total` — Counter for proxy attempts by model and observed status
 - `gateway_request_duration_seconds` — Histogram for request latency
 - `gateway_requests_total` — Counter for requests by model and status
@@ -122,7 +125,7 @@ Client → Gateway → Balancer.Select() → Health Monitor
 ```
 
 1. Client sends request to gateway
-2. Gateway extracts the model from the request body (applying the configured default when omitted) and picks the routing pool: the model's ring nodes, or the ring-less nodes for non-ring models
+2. Gateway extracts the model from the request body (applying the configured default when omitted) and picks the routing pool: the model's ring nodes, or the ring-less nodes for non-ring models. Candidate nodes are then filtered by `ModelDiscovery.Allows` (exact model id match from each node's `/v1/models`); listing runs in the monitor discovery loop and never affects health status.
 3. Balancer selects a node within that pool based on health state
 4. Gateway reverse-proxies request to selected vLLM instance
 5. Response is buffered up to max_buffered_response_bytes and returned to client; oversized responses are committed early and passed through (no SSE on this path)

@@ -34,6 +34,8 @@ ring = "ring-a"
 default = "Qwen/Qwen2.5-7B-Instruct"
 
 # Ring model — routed round-robin among the nodes in ring-a
+# name must exactly match the model id the node serves via GET /v1/models
+# (data[].id). No aliasing. models.default has the same requirement.
 [[models.available]]
 name = "Qwen/Qwen2.5-32B-Instruct-Q4"
 pipeline_stages = 2 # informational metadata; not enforced by the gateway
