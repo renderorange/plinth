@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"sync/atomic"
 	"testing"
@@ -1045,6 +1046,97 @@ func TestGetNodeStatesDeepCopiesModelNames(t *testing.T) {
 	if m.nodes["10.0.0.1"].Models.Names[0] != "a" {
 		t.Errorf("source Names[0] = %q, want \"a\" (deep copy failed)", m.nodes["10.0.0.1"].Models.Names[0])
 	}
+}
+
+func TestGetNodeStatesDeepCopiesGPUs(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+	}
+	m := NewMonitor(cfg)
+	m.mu.Lock()
+	m.nodes["10.0.0.1"].GPUs = []GPUMetrics{
+		{UUID: "GPU-abc", MemoryUsed: 100, MemoryTotal: 200, Utilization: 50, Temperature: 40},
+	}
+	m.mu.Unlock()
+
+	states := m.GetNodeStates()
+	if len(states) != 1 || len(states[0].GPUs) != 1 {
+		t.Fatalf("states = %+v", states)
+	}
+	states[0].GPUs[0].UUID = "MUTATED"
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.nodes["10.0.0.1"].GPUs[0].UUID != "GPU-abc" {
+		t.Errorf("source GPUs[0].UUID = %q, want \"GPU-abc\" (deep copy failed)", m.nodes["10.0.0.1"].GPUs[0].UUID)
+	}
+}
+
+func TestNodeStateCloneIsolatesAllSliceFields(t *testing.T) {
+	src := NodeState{
+		IP:                  "10.0.0.1",
+		Name:                "n1",
+		Status:              Degraded,
+		LastCheck:           time.Now(),
+		ConsecutiveFailures: 2,
+		GPUs: []GPUMetrics{
+			{UUID: "GPU-abc", MemoryUsed: 100, MemoryTotal: 200, Utilization: 50, Temperature: 40},
+			{UUID: "GPU-def", MemoryUsed: 110, MemoryTotal: 200, Utilization: 60, Temperature: 41},
+		},
+		Models: ModelDiscovery{
+			State:     ModelsKnown,
+			Names:     []string{"a", "b"},
+			FetchedAt: time.Now(),
+			Fails:     1,
+			Empties:   1,
+			LastError: "old",
+		},
+	}
+	clone := src.Clone()
+
+	checkSlice := func(name string, a, b reflect.Value) {
+		t.Helper()
+		if a.Len() != b.Len() {
+			t.Fatalf("%s: clone len = %d, want %d", name, b.Len(), a.Len())
+		}
+		if a.Pointer() == b.Pointer() {
+			t.Fatalf("%s: clone shares a backing array with the source", name)
+		}
+		elemType := a.Type().Elem()
+		orig := a.Index(0).Interface()
+
+		b.Index(0).Set(reflect.Zero(elemType))
+		if !reflect.DeepEqual(a.Index(0).Interface(), orig) {
+			t.Errorf("%s: mutating the clone element changed the source", name)
+		}
+		b.Index(0).Set(reflect.ValueOf(orig))
+
+		a.Index(0).Set(reflect.Zero(elemType))
+		if !reflect.DeepEqual(b.Index(0).Interface(), orig) {
+			t.Errorf("%s: mutating the source element changed the clone", name)
+		}
+		a.Index(0).Set(reflect.ValueOf(orig))
+	}
+
+	// Fixture completeness: every slice field must be populated so a newly
+	// added field fails this test until the fixture covers it. The walks pick
+	// up new fields automatically.
+	walk := func(prefix string, s, c reflect.Value) {
+		t.Helper()
+		for i := 0; i < s.NumField(); i++ {
+			f := s.Type().Field(i)
+			if f.Type.Kind() != reflect.Slice {
+				continue
+			}
+			if s.Field(i).Len() == 0 {
+				t.Fatalf("fixture slice %s%s is empty; populate it so Clone stays covered", prefix, f.Name)
+			}
+			checkSlice(prefix+f.Name, s.Field(i), c.Field(i))
+		}
+	}
+	walk("", reflect.ValueOf(src), reflect.ValueOf(clone))
+	walk("Models.", reflect.ValueOf(src.Models), reflect.ValueOf(clone.Models))
 }
 
 func TestNewMonitorWithStateCarriesModels(t *testing.T) {

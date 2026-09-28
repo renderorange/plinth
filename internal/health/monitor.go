@@ -94,11 +94,7 @@ func (m *Monitor) GetNodeStates() []NodeState {
 	defer m.mu.RUnlock()
 	states := make([]NodeState, 0, len(m.nodes))
 	for _, n := range m.nodes {
-		st := *n
-		if n.Models.Names != nil {
-			st.Models.Names = append([]string(nil), n.Models.Names...)
-		}
-		states = append(states, st)
+		states = append(states, n.Clone())
 	}
 	sort.Slice(states, func(i, j int) bool {
 		return states[i].IP < states[j].IP
