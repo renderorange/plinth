@@ -1190,6 +1190,26 @@ func TestNewMonitorWithStateCarriesModels(t *testing.T) {
 	}
 }
 
+func TestNewMonitorWithStateDoesNotCarryGPUs(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+	}
+	prev := []NodeState{{
+		IP:   "10.0.0.1",
+		Name: "n1",
+		GPUs: []GPUMetrics{{UUID: "GPU-abc", MemoryUsed: 100, MemoryTotal: 200}},
+	}}
+	m := NewMonitorWithState(cfg, prev)
+	states := m.GetNodeStates()
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if len(states[0].GPUs) != 0 {
+		t.Errorf("GPUs = %v, want empty (GPUs must not carry over; the next scrape fills them)", states[0].GPUs)
+	}
+}
+
 func TestNewMonitorWithStateFreshNodeStaysUntried(t *testing.T) {
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},

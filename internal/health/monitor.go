@@ -53,9 +53,10 @@ func NewMonitor(cfg *config.Config) *Monitor {
 // NewMonitorWithState builds a monitor like NewMonitor but seeds state for IPs
 // present in both the new config and prev: Status, ConsecutiveFailures, and
 // Models carry over so a reload does not give flapping nodes a clean slate.
-// Models.Names is deep-copied so the new monitor never shares a backing array
-// with prev. Nodes not present in prev start Healthy and untried, matching
-// startup semantics.
+// Carried Models are deep-copied (Clone) so the new monitor never shares a
+// backing array with prev. GPUs are deliberately not carried over; they
+// repopulate from the first scrape after the reload. Nodes not present in prev
+// start Healthy and untried, matching startup semantics.
 func NewMonitorWithState(cfg *config.Config, prev []NodeState) *Monitor {
 	m := NewMonitor(cfg)
 	prevByIP := make(map[string]NodeState, len(prev))
@@ -66,10 +67,7 @@ func NewMonitorWithState(cfg *config.Config, prev []NodeState) *Monitor {
 		if old, ok := prevByIP[ip]; ok {
 			n.Status = old.Status
 			n.ConsecutiveFailures = old.ConsecutiveFailures
-			n.Models = old.Models
-			if old.Models.Names != nil {
-				n.Models.Names = append([]string(nil), old.Models.Names...)
-			}
+			n.Models = old.Models.Clone()
 		}
 	}
 	return m
