@@ -1120,24 +1120,65 @@ func TestNodeStateCloneIsolatesAllSliceFields(t *testing.T) {
 		a.Index(0).Set(reflect.ValueOf(orig))
 	}
 
-	// Fixture completeness: every slice field must be populated so a newly
-	// added field fails this test until the fixture covers it. The walks pick
-	// up new fields automatically.
-	walk := func(prefix string, s, c reflect.Value) {
+	// Fixture completeness: every slice or map field at any depth must be
+	// populated so a newly added field fails this test until the fixture
+	// covers it. The walk recurses through struct fields, struct slice
+	// elements, and array elements, so a nested reference field (e.g. inside
+	// GPUMetrics) is picked up automatically and Clone must deep-copy it.
+	checkMap := func(name string, a, b reflect.Value) {
+		t.Helper()
+		k := a.MapKeys()[0]
+		orig := a.MapIndex(k)
+
+		b.SetMapIndex(k, reflect.Zero(b.Type().Elem()))
+		if !reflect.DeepEqual(a.MapIndex(k).Interface(), orig.Interface()) {
+			t.Errorf("%s: mutating the clone map changed the source", name)
+		}
+		b.SetMapIndex(k, orig)
+
+		a.SetMapIndex(k, reflect.Zero(a.Type().Elem()))
+		if !reflect.DeepEqual(b.MapIndex(k).Interface(), orig.Interface()) {
+			t.Errorf("%s: mutating the source map changed the clone", name)
+		}
+		a.SetMapIndex(k, orig)
+	}
+
+	var checkValue func(name string, a, b reflect.Value)
+	var checkFields func(prefix string, s, c reflect.Value)
+	checkFields = func(prefix string, s, c reflect.Value) {
 		t.Helper()
 		for i := 0; i < s.NumField(); i++ {
 			f := s.Type().Field(i)
-			if f.Type.Kind() != reflect.Slice {
-				continue
-			}
-			if s.Field(i).Len() == 0 {
-				t.Fatalf("fixture slice %s%s is empty; populate it so Clone stays covered", prefix, f.Name)
-			}
-			checkSlice(prefix+f.Name, s.Field(i), c.Field(i))
+			checkValue(prefix+f.Name, s.Field(i), c.Field(i))
 		}
 	}
-	walk("", reflect.ValueOf(src), reflect.ValueOf(clone))
-	walk("Models.", reflect.ValueOf(src.Models), reflect.ValueOf(clone.Models))
+	checkValue = func(name string, a, b reflect.Value) {
+		t.Helper()
+		switch a.Kind() {
+		case reflect.Struct:
+			checkFields(name+".", a, b)
+		case reflect.Slice:
+			if a.Len() == 0 {
+				t.Fatalf("fixture slice %s is empty; populate it so Clone stays covered", name)
+			}
+			checkSlice(name, a, b)
+			if a.Type().Elem().Kind() == reflect.Struct {
+				for j := 0; j < a.Len(); j++ {
+					checkFields(fmt.Sprintf("%s[%d].", name, j), a.Index(j), b.Index(j))
+				}
+			}
+		case reflect.Map:
+			if a.Len() == 0 {
+				t.Fatalf("fixture map %s is empty; populate it so Clone stays covered", name)
+			}
+			checkMap(name, a, b)
+		case reflect.Array:
+			for j := 0; j < a.Len(); j++ {
+				checkValue(fmt.Sprintf("%s[%d]", name, j), a.Index(j), b.Index(j))
+			}
+		}
+	}
+	checkFields("", reflect.ValueOf(src), reflect.ValueOf(clone))
 }
 
 func TestNewMonitorWithStateCarriesModels(t *testing.T) {
