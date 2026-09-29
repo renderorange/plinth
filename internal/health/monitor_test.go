@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1242,4 +1243,96 @@ func TestTryStartModelsIndependentOfChecking(t *testing.T) {
 	if !m.tryStartModels("10.0.0.1") {
 		t.Fatal("tryStartModels after finishModels")
 	}
+}
+
+func TestGetNodeStatesConcurrentWithUpdates(t *testing.T) {
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vllm.Close()
+
+	var scrape atomic.Uint64
+	metricsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := scrape.Add(1)
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "gpu_memory_used_bytes{gpu=\"GPU-%d\"} %d\ngpu_memory_total_bytes{gpu=\"GPU-%d\"} 200\ngpu_utilization_percent{gpu=\"GPU-%d\"} 50\ngpu_temperature_celsius{gpu=\"GPU-%d\"} 40\n", id, id, id, id, id)
+	}))
+	defer metricsSrv.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{{
+			IP:          "127.0.0.1",
+			Name:        "n1",
+			VLLMPort:    extractPort(vllm.URL),
+			MetricsPort: extractPort(metricsSrv.URL),
+		}},
+	}
+	m := NewMonitor(cfg)
+
+	var writers, readers sync.WaitGroup
+
+	// Writer 1: the health-check path, which replaces node.GPUs wholesale.
+	writers.Add(1)
+	go func() {
+		defer writers.Done()
+		for i := 0; i < 200; i++ {
+			m.checkNode(cfg.Nodes[0])
+		}
+	}()
+
+	// Writer 2: the model-discovery path.
+	writers.Add(1)
+	go func() {
+		defer writers.Done()
+		for i := 0; i < 200; i++ {
+			m.applyModelsResult("127.0.0.1", []string{"m1", "m2"}, nil)
+			m.applyModelsResult("127.0.0.1", nil, fmt.Errorf("fetch failed"))
+		}
+	}()
+
+	// Readers: snapshot, mutate the snapshot, and verify the live node never
+	// observes the mutation. Any aliasing shows up as a content error; any
+	// in-place write to a shared array shows up under -race.
+	stop := make(chan struct{})
+	for r := 0; r < 4; r++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				states := m.GetNodeStates()
+				if len(states) != 1 {
+					t.Errorf("states = %d, want 1", len(states))
+					return
+				}
+				if len(states[0].GPUs) > 0 {
+					states[0].GPUs[0].UUID = "MUTATED"
+				}
+				if len(states[0].Models.Names) > 0 {
+					states[0].Models.Names[0] = "MUTATED"
+				}
+				m.mu.RLock()
+				for _, g := range m.nodes["127.0.0.1"].GPUs {
+					if g.UUID == "MUTATED" {
+						t.Errorf("live GPUs saw a snapshot mutation (aliasing)")
+					}
+				}
+				for _, n := range m.nodes["127.0.0.1"].Models.Names {
+					if n == "MUTATED" {
+						t.Errorf("live Models.Names saw a snapshot mutation (aliasing)")
+					}
+				}
+				m.mu.RUnlock()
+			}
+		}()
+	}
+
+	writers.Wait()
+	close(stop)
+	readers.Wait()
 }
