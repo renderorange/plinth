@@ -5,7 +5,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1047,6 +1049,138 @@ func TestGetNodeStatesDeepCopiesModelNames(t *testing.T) {
 	}
 }
 
+func TestGetNodeStatesDeepCopiesGPUs(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+	}
+	m := NewMonitor(cfg)
+	m.mu.Lock()
+	m.nodes["10.0.0.1"].GPUs = []GPUMetrics{
+		{UUID: "GPU-abc", MemoryUsed: 100, MemoryTotal: 200, Utilization: 50, Temperature: 40},
+	}
+	m.mu.Unlock()
+
+	states := m.GetNodeStates()
+	if len(states) != 1 || len(states[0].GPUs) != 1 {
+		t.Fatalf("states = %+v", states)
+	}
+	states[0].GPUs[0].UUID = "MUTATED"
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.nodes["10.0.0.1"].GPUs[0].UUID != "GPU-abc" {
+		t.Errorf("source GPUs[0].UUID = %q, want \"GPU-abc\" (deep copy failed)", m.nodes["10.0.0.1"].GPUs[0].UUID)
+	}
+}
+
+func TestNodeStateCloneIsolatesAllSliceFields(t *testing.T) {
+	src := NodeState{
+		IP:                  "10.0.0.1",
+		Name:                "n1",
+		Status:              Degraded,
+		LastCheck:           time.Now(),
+		ConsecutiveFailures: 2,
+		GPUs: []GPUMetrics{
+			{UUID: "GPU-abc", MemoryUsed: 100, MemoryTotal: 200, Utilization: 50, Temperature: 40},
+			{UUID: "GPU-def", MemoryUsed: 110, MemoryTotal: 200, Utilization: 60, Temperature: 41},
+		},
+		Models: ModelDiscovery{
+			State:     ModelsKnown,
+			Names:     []string{"a", "b"},
+			FetchedAt: time.Now(),
+			Fails:     1,
+			Empties:   1,
+			LastError: "old",
+		},
+	}
+	clone := src.Clone()
+
+	checkSlice := func(name string, a, b reflect.Value) {
+		t.Helper()
+		if a.Len() != b.Len() {
+			t.Fatalf("%s: clone len = %d, want %d", name, b.Len(), a.Len())
+		}
+		if a.Pointer() == b.Pointer() {
+			t.Fatalf("%s: clone shares a backing array with the source", name)
+		}
+		elemType := a.Type().Elem()
+		orig := a.Index(0).Interface()
+
+		b.Index(0).Set(reflect.Zero(elemType))
+		if !reflect.DeepEqual(a.Index(0).Interface(), orig) {
+			t.Errorf("%s: mutating the clone element changed the source", name)
+		}
+		b.Index(0).Set(reflect.ValueOf(orig))
+
+		a.Index(0).Set(reflect.Zero(elemType))
+		if !reflect.DeepEqual(b.Index(0).Interface(), orig) {
+			t.Errorf("%s: mutating the source element changed the clone", name)
+		}
+		a.Index(0).Set(reflect.ValueOf(orig))
+	}
+
+	// Fixture completeness: every slice or map field at any depth must be
+	// populated so a newly added field fails this test until the fixture
+	// covers it. The walk recurses through struct fields, struct slice
+	// elements, and array elements, so a nested reference field (e.g. inside
+	// GPUMetrics) is picked up automatically and Clone must deep-copy it.
+	checkMap := func(name string, a, b reflect.Value) {
+		t.Helper()
+		k := a.MapKeys()[0]
+		orig := a.MapIndex(k)
+
+		b.SetMapIndex(k, reflect.Zero(b.Type().Elem()))
+		if !reflect.DeepEqual(a.MapIndex(k).Interface(), orig.Interface()) {
+			t.Errorf("%s: mutating the clone map changed the source", name)
+		}
+		b.SetMapIndex(k, orig)
+
+		a.SetMapIndex(k, reflect.Zero(a.Type().Elem()))
+		if !reflect.DeepEqual(b.MapIndex(k).Interface(), orig.Interface()) {
+			t.Errorf("%s: mutating the source map changed the clone", name)
+		}
+		a.SetMapIndex(k, orig)
+	}
+
+	var checkValue func(name string, a, b reflect.Value)
+	var checkFields func(prefix string, s, c reflect.Value)
+	checkFields = func(prefix string, s, c reflect.Value) {
+		t.Helper()
+		for i := 0; i < s.NumField(); i++ {
+			f := s.Type().Field(i)
+			checkValue(prefix+f.Name, s.Field(i), c.Field(i))
+		}
+	}
+	checkValue = func(name string, a, b reflect.Value) {
+		t.Helper()
+		switch a.Kind() {
+		case reflect.Struct:
+			checkFields(name+".", a, b)
+		case reflect.Slice:
+			if a.Len() == 0 {
+				t.Fatalf("fixture slice %s is empty; populate it so Clone stays covered", name)
+			}
+			checkSlice(name, a, b)
+			if a.Type().Elem().Kind() == reflect.Struct {
+				for j := 0; j < a.Len(); j++ {
+					checkFields(fmt.Sprintf("%s[%d].", name, j), a.Index(j), b.Index(j))
+				}
+			}
+		case reflect.Map:
+			if a.Len() == 0 {
+				t.Fatalf("fixture map %s is empty; populate it so Clone stays covered", name)
+			}
+			checkMap(name, a, b)
+		case reflect.Array:
+			for j := 0; j < a.Len(); j++ {
+				checkValue(fmt.Sprintf("%s[%d]", name, j), a.Index(j), b.Index(j))
+			}
+		}
+	}
+	checkFields("", reflect.ValueOf(src), reflect.ValueOf(clone))
+}
+
 func TestNewMonitorWithStateCarriesModels(t *testing.T) {
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
@@ -1098,6 +1232,26 @@ func TestNewMonitorWithStateCarriesModels(t *testing.T) {
 	}
 }
 
+func TestNewMonitorWithStateDoesNotCarryGPUs(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n1", VLLMPort: 8000}},
+	}
+	prev := []NodeState{{
+		IP:   "10.0.0.1",
+		Name: "n1",
+		GPUs: []GPUMetrics{{UUID: "GPU-abc", MemoryUsed: 100, MemoryTotal: 200}},
+	}}
+	m := NewMonitorWithState(cfg, prev)
+	states := m.GetNodeStates()
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if len(states[0].GPUs) != 0 {
+		t.Errorf("GPUs = %v, want empty (GPUs must not carry over; the next scrape fills them)", states[0].GPUs)
+	}
+}
+
 func TestNewMonitorWithStateFreshNodeStaysUntried(t *testing.T) {
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
@@ -1130,4 +1284,96 @@ func TestTryStartModelsIndependentOfChecking(t *testing.T) {
 	if !m.tryStartModels("10.0.0.1") {
 		t.Fatal("tryStartModels after finishModels")
 	}
+}
+
+func TestGetNodeStatesConcurrentWithUpdates(t *testing.T) {
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vllm.Close()
+
+	var scrape atomic.Uint64
+	metricsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := scrape.Add(1)
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "gpu_memory_used_bytes{gpu=\"GPU-%d\"} %d\ngpu_memory_total_bytes{gpu=\"GPU-%d\"} 200\ngpu_utilization_percent{gpu=\"GPU-%d\"} 50\ngpu_temperature_celsius{gpu=\"GPU-%d\"} 40\n", id, id, id, id, id)
+	}))
+	defer metricsSrv.Close()
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Hour, HealthFailThreshold: 3},
+		Nodes: []config.NodeConfig{{
+			IP:          "127.0.0.1",
+			Name:        "n1",
+			VLLMPort:    extractPort(vllm.URL),
+			MetricsPort: extractPort(metricsSrv.URL),
+		}},
+	}
+	m := NewMonitor(cfg)
+
+	var writers, readers sync.WaitGroup
+
+	// Writer 1: the health-check path, which replaces node.GPUs wholesale.
+	writers.Add(1)
+	go func() {
+		defer writers.Done()
+		for i := 0; i < 200; i++ {
+			m.checkNode(cfg.Nodes[0])
+		}
+	}()
+
+	// Writer 2: the model-discovery path.
+	writers.Add(1)
+	go func() {
+		defer writers.Done()
+		for i := 0; i < 200; i++ {
+			m.applyModelsResult("127.0.0.1", []string{"m1", "m2"}, nil)
+			m.applyModelsResult("127.0.0.1", nil, fmt.Errorf("fetch failed"))
+		}
+	}()
+
+	// Readers: snapshot, mutate the snapshot, and verify the live node never
+	// observes the mutation. Any aliasing shows up as a content error; any
+	// in-place write to a shared array shows up under -race.
+	stop := make(chan struct{})
+	for r := 0; r < 4; r++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				states := m.GetNodeStates()
+				if len(states) != 1 {
+					t.Errorf("states = %d, want 1", len(states))
+					return
+				}
+				if len(states[0].GPUs) > 0 {
+					states[0].GPUs[0].UUID = "MUTATED"
+				}
+				if len(states[0].Models.Names) > 0 {
+					states[0].Models.Names[0] = "MUTATED"
+				}
+				m.mu.RLock()
+				for _, g := range m.nodes["127.0.0.1"].GPUs {
+					if g.UUID == "MUTATED" {
+						t.Errorf("live GPUs saw a snapshot mutation (aliasing)")
+					}
+				}
+				for _, n := range m.nodes["127.0.0.1"].Models.Names {
+					if n == "MUTATED" {
+						t.Errorf("live Models.Names saw a snapshot mutation (aliasing)")
+					}
+				}
+				m.mu.RUnlock()
+			}
+		}()
+	}
+
+	writers.Wait()
+	close(stop)
+	readers.Wait()
 }

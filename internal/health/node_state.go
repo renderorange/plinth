@@ -114,6 +114,22 @@ func (d ModelDiscovery) Age(now time.Time) time.Duration {
 	return now.Sub(d.FetchedAt)
 }
 
+// Clone returns a deep copy of d. The returned value shares no slice backing
+// arrays with d.
+func (d ModelDiscovery) Clone() ModelDiscovery {
+	out := d
+	if d.Names != nil {
+		out.Names = append([]string(nil), d.Names...)
+	}
+	return out
+}
+
+// NodeState is one node's last-observed health state.
+//
+// Ownership: values returned by GetNodeStates are fully owned by the caller
+// (deep-copied via Clone) and may be mutated freely. NewMonitorWithState
+// deep-copies everything it carries from prev. The monitor never mutates
+// published slice elements in place; updates replace whole slices.
 type NodeState struct {
 	IP                  string
 	Name                string
@@ -122,6 +138,17 @@ type NodeState struct {
 	ConsecutiveFailures int
 	GPUs                []GPUMetrics
 	Models              ModelDiscovery
+}
+
+// Clone returns a deep copy of n. The returned value shares no slice backing
+// arrays with n. See the NodeState ownership rules.
+func (n NodeState) Clone() NodeState {
+	out := n
+	if n.GPUs != nil {
+		out.GPUs = append([]GPUMetrics(nil), n.GPUs...)
+	}
+	out.Models = n.Models.Clone()
+	return out
 }
 
 func computeStatus(consecutiveFailures, threshold int) Status {
