@@ -9,16 +9,17 @@ import (
 )
 
 const (
-	defaultListen          = ":8000"
-	defaultMetricsListen   = ":9090"
-	defaultHealthInterval  = 3 * time.Second
-	defaultFailThreshold   = 3
-	defaultVLLMPort        = 8000
-	defaultMetricsPort     = 9100
-	defaultWeightsDir      = "/var/lib/plinth/weights"
-	defaultSSHKeyPath      = "~/.ssh/id_rsa"
-	defaultGPUExporterBin  = "./gpu-exporter"
-	defaultServiceFilesDir = "./scripts"
+	defaultListen                   = ":8000"
+	defaultMetricsListen            = ":9090"
+	defaultHealthInterval           = 3 * time.Second
+	defaultFailThreshold            = 3
+	defaultRequestOverloadThreshold = 3
+	defaultVLLMPort                 = 8000
+	defaultMetricsPort              = 9100
+	defaultWeightsDir               = "/var/lib/plinth/weights"
+	defaultSSHKeyPath               = "~/.ssh/id_rsa"
+	defaultGPUExporterBin           = "./gpu-exporter"
+	defaultServiceFilesDir          = "./scripts"
 
 	defaultMaxBufferedResponseBytes int64 = 8 << 20
 	defaultMaxRequestBodyBytes      int64 = 32 << 20
@@ -39,6 +40,7 @@ type rawGatewayConfig struct {
 	HealthFailThreshold      int    `toml:"health_fail_threshold"`
 	MaxBufferedResponseBytes int64  `toml:"max_buffered_response_bytes"`
 	MaxRequestBodyBytes      int64  `toml:"max_request_body_bytes"`
+	RequestOverloadThreshold int    `toml:"request_overload_threshold"`
 }
 
 func Load(path string) (*Config, error) {
@@ -55,11 +57,12 @@ func Load(path string) (*Config, error) {
 	cfg := &Config{
 		Cluster: raw.Cluster,
 		Gateway: GatewayConfig{
-			Listen:                   raw.Gateway.Listen,
-			MetricsListen:            raw.Gateway.MetricsListen,
-			HealthFailThreshold:      raw.Gateway.HealthFailThreshold,
-			MaxBufferedResponseBytes: raw.Gateway.MaxBufferedResponseBytes,
-			MaxRequestBodyBytes:      raw.Gateway.MaxRequestBodyBytes,
+			Listen:                        raw.Gateway.Listen,
+			MetricsListen:                 raw.Gateway.MetricsListen,
+			HealthFailThreshold:           raw.Gateway.HealthFailThreshold,
+			MaxBufferedResponseBytes:      raw.Gateway.MaxBufferedResponseBytes,
+			MaxRequestBodyBytes:           raw.Gateway.MaxRequestBodyBytes,
+			RequestOverloadThresholdValue: raw.Gateway.RequestOverloadThreshold,
 		},
 		Nodes:     raw.Nodes,
 		Models:    raw.Models,
