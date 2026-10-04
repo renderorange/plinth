@@ -2343,8 +2343,6 @@ func TestProxyToVLLMStreaming503ElevatesNode(t *testing.T) {
 		}
 		return false
 	})
-	_ = vllmA
-	_ = vllmB
 }
 
 // Committed site: an oversized 503 body is committed to the client (pass-through

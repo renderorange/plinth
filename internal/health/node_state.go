@@ -139,7 +139,7 @@ type NodeState struct {
 	// ReqStreak is the consecutive request-level 5xx outcomes (ReportOutcome
 	// hits) observed for this node. It drives request elevation: a streak of
 	// requestOverloadThreshold or more changes the served status to Degraded
-	// until the streak clears (Task 3) or decays (time-based, read-evaluated).
+	// until the streak clears or decays (time-based, read-evaluated).
 	ReqStreak int
 	// ReqLastHit is the time of the most recent streak increment. Together
 	// with ReqStreak it determines request elevation; see RequestElevated.

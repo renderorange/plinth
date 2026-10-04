@@ -163,7 +163,7 @@ Node IPs must be unique — the gateway identifies nodes by IP.
 | State | Description |
 |-------|-------------|
 | `Healthy` | Node responding to health checks |
-| `Degraded` | Node failing health checks (below threshold) |
+| `Degraded` | Node failing health checks (below threshold) or relegated by a request-level 5xx streak |
 | `Dead` | Node exceeded failure threshold |
 
 The gateway prefers healthy nodes. If none are available, it falls back to degraded nodes. Dead nodes are excluded from load balancing.

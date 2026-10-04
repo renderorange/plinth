@@ -33,7 +33,7 @@ Returns cluster health status.
 | `healthy` | int | healthy count (unchanged) |
 | `models_ok` | int | nodes whose model discovery is `known` or `known_empty` |
 | `details` | array | per-node status + `models` object |
-| `details[].req_streak` | int | consecutive request-level 5xx outcomes (0 while serving normally) |
+| `details[].req_streak` | int | consecutive request-level 5xx outcomes; elevates the node to `degraded` at the configured threshold, re-armed per hit and expired from elevation 10s after the last hit (the raw streak is shown) |
 | `details[].models.state` | string | `untried` / `known` / `known_empty` / `degraded` / `expired` |
 | `details[].models.names` | array\|null | last-known-good model ids |
 | `details[].models.age_seconds` | number\|null | seconds since last successful fetch |

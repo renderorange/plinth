@@ -138,7 +138,8 @@ func (m *Monitor) Recheck(ip string) {
 // ReportOutcome records the HTTP status of one proxied attempt against a
 // node. status >= 500 is a request-level failure ("the node said no"); any
 // other status proves the node served the request and clears the streak.
-// Fire-and-forget; no-op for unknown IPs. Transport failures (no status) are
+// The caller does not use the return value; reports are serialized under the
+// monitor lock. No-op for unknown IPs. Transport failures (no status) are
 // handled by the connection-failure path and must not be reported here.
 func (m *Monitor) ReportOutcome(ip string, status int) {
 	now := time.Now()

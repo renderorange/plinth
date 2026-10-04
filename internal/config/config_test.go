@@ -560,6 +560,13 @@ func TestRequestBodyLimitWithoutValidate(t *testing.T) {
 	}
 }
 
+func TestRequestOverloadThresholdWithoutValidate(t *testing.T) {
+	var g GatewayConfig
+	if got := g.RequestOverloadThreshold(); got != defaultRequestOverloadThreshold {
+		t.Errorf("zero-value RequestOverloadThreshold() = %d, want %d", got, defaultRequestOverloadThreshold)
+	}
+}
+
 func TestValidateNegativeRequestOverloadThreshold(t *testing.T) {
 	cfg := &Config{
 		Gateway: GatewayConfig{
