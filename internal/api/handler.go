@@ -102,10 +102,11 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		LastError  string   `json:"last_error"`
 	}
 	type nodeView struct {
-		IP     string     `json:"ip"`
-		Name   string     `json:"name"`
-		Status string     `json:"status"`
-		Models modelsView `json:"models"`
+		IP        string     `json:"ip"`
+		Name      string     `json:"name"`
+		Status    string     `json:"status"`
+		ReqStreak int        `json:"req_streak"`
+		Models    modelsView `json:"models"`
 	}
 
 	states := h.state.Load().mon.GetNodeStates()
@@ -132,10 +133,11 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 			mv.AgeSeconds = &age
 		}
 		details = append(details, nodeView{
-			IP:     s.IP,
-			Name:   s.Name,
-			Status: s.Status.String(),
-			Models: mv,
+			IP:        s.IP,
+			Name:      s.Name,
+			Status:    s.Status.String(),
+			ReqStreak: s.ReqStreak,
+			Models:    mv,
 		})
 	}
 	status := "ok"
@@ -297,6 +299,9 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 				metrics.RequestsTotal.WithLabelValues(modelName, "500").Inc()
 				return
 			}
+			if gate.status != 0 && gate.err == nil {
+				st.mon.ReportOutcome(node.IP, gate.status)
+			}
 			switch {
 			case gate.err == nil && gate.writeErr != nil:
 				// The client stopped reading after the response was committed.
@@ -368,6 +373,9 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 			default:
 				h.offline.clear(node.IP)
 			}
+			if res.status != 0 {
+				st.mon.ReportOutcome(node.IP, res.status)
+			}
 			metrics.RequestDuration.Observe(time.Since(start).Seconds())
 			metrics.RequestsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", status)).Inc()
 			metrics.ProxyAttemptsTotal.WithLabelValues(modelName, fmt.Sprintf("%d", status)).Inc()
@@ -376,6 +384,9 @@ func (h *Handler) proxyToVLLM(w http.ResponseWriter, r *http.Request, path strin
 
 		switch classifyProxyError(res.err) {
 		case outcomeOK:
+			if res.status != 0 {
+				st.mon.ReportOutcome(node.IP, res.status)
+			}
 			h.offline.clear(node.IP)
 			if err := commitResponse(w, res); err != nil {
 				// The client stopped reading after the response was committed.
