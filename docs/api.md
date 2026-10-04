@@ -21,7 +21,7 @@ Returns cluster health status.
   "healthy": 2,
   "models_ok": 2,
   "details": [
-    {"ip": "10.0.0.1", "name": "gpu-node-1", "status": "healthy", "models": {"state": "known", "names": ["Qwen/Qwen2.5-7B-Instruct", "Qwen/Qwen2.5-32B-Instruct-Q4"], "age_seconds": 12.4, "fails": 0, "last_error": ""}}
+    {"ip": "10.0.0.1", "name": "gpu-node-1", "status": "healthy", "req_streak": 0, "models": {"state": "known", "names": ["Qwen/Qwen2.5-7B-Instruct", "Qwen/Qwen2.5-32B-Instruct-Q4"], "age_seconds": 12.4, "fails": 0, "last_error": ""}}
   ]
 }
 ```
@@ -33,6 +33,7 @@ Returns cluster health status.
 | `healthy` | int | healthy count (unchanged) |
 | `models_ok` | int | nodes whose model discovery is `known` or `known_empty` |
 | `details` | array | per-node status + `models` object |
+| `details[].req_streak` | int | consecutive request-level 5xx outcomes (0 while serving normally) |
 | `details[].models.state` | string | `untried` / `known` / `known_empty` / `degraded` / `expired` |
 | `details[].models.names` | array\|null | last-known-good model ids |
 | `details[].models.age_seconds` | number\|null | seconds since last successful fetch |
