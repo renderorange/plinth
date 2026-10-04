@@ -408,6 +408,46 @@ pipeline_stages = 1
 				}
 			},
 		},
+		{
+			name: "explicit request_overload_threshold is kept",
+			toml: `
+[cluster]
+name = "test"
+
+[gateway]
+request_overload_threshold = 9
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "n1"
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if cfg.Gateway.RequestOverloadThresholdValue != 9 {
+					t.Errorf("RequestOverloadThreshold = %d, want 9", cfg.Gateway.RequestOverloadThresholdValue)
+				}
+			},
+		},
+		{
+			name: "missing request_overload_threshold uses default",
+			toml: `
+[cluster]
+name = "test"
+
+[gateway]
+health_interval = "5s"
+
+[[nodes]]
+ip = "10.0.0.1"
+name = "n1"
+`,
+			wantErr: false,
+			validate: func(t *testing.T, cfg *Config) {
+				if cfg.Gateway.RequestOverloadThresholdValue != defaultRequestOverloadThreshold {
+					t.Errorf("RequestOverloadThreshold = %d, want default %d", cfg.Gateway.RequestOverloadThresholdValue, defaultRequestOverloadThreshold)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

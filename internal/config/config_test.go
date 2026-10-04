@@ -559,3 +559,57 @@ func TestRequestBodyLimitWithoutValidate(t *testing.T) {
 		t.Errorf("zero-value RequestBodyLimit() = %d, want %d", got, 32<<20)
 	}
 }
+
+func TestRequestOverloadThresholdWithoutValidate(t *testing.T) {
+	var g GatewayConfig
+	if got := g.RequestOverloadThreshold(); got != defaultRequestOverloadThreshold {
+		t.Errorf("zero-value RequestOverloadThreshold() = %d, want %d", got, defaultRequestOverloadThreshold)
+	}
+}
+
+func TestValidateNegativeRequestOverloadThreshold(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{
+			HealthInterval:                time.Second,
+			HealthFailThreshold:           3,
+			RequestOverloadThresholdValue: -1,
+		},
+		Nodes: []NodeConfig{{IP: "127.0.0.1", Name: "n"}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative request_overload_threshold")
+	}
+}
+
+func TestValidateDefaultRequestOverloadThreshold(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []NodeConfig{{IP: "127.0.0.1", Name: "n"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.Gateway.RequestOverloadThresholdValue != defaultRequestOverloadThreshold {
+		t.Errorf("RequestOverloadThreshold = %d, want default %d", cfg.Gateway.RequestOverloadThresholdValue, defaultRequestOverloadThreshold)
+	}
+	if got := cfg.Gateway.RequestOverloadThreshold(); got != defaultRequestOverloadThreshold {
+		t.Errorf("RequestOverloadThreshold() = %d, want %d", got, defaultRequestOverloadThreshold)
+	}
+}
+
+func TestValidateExplicitRequestOverloadThreshold(t *testing.T) {
+	cfg := &Config{
+		Gateway: GatewayConfig{
+			HealthInterval:                time.Second,
+			HealthFailThreshold:           3,
+			RequestOverloadThresholdValue: 7,
+		},
+		Nodes: []NodeConfig{{IP: "127.0.0.1", Name: "n"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if got := cfg.Gateway.RequestOverloadThreshold(); got != 7 {
+		t.Errorf("RequestOverloadThreshold() = %d, want 7", got)
+	}
+}

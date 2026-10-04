@@ -1377,3 +1377,188 @@ func TestGetNodeStatesConcurrentWithUpdates(t *testing.T) {
 	close(stop)
 	readers.Wait()
 }
+
+func TestReportOutcomeStreakAndMerge(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.1", Name: "n"}},
+	}
+	mon := NewMonitor(cfg)
+
+	state := func() NodeState {
+		got := mon.GetNodeStates()
+		if len(got) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(got))
+		}
+		return got[0]
+	}
+
+	// Healthy node (probe never ran; zero failures => Healthy), 503 hits.
+	mon.ReportOutcome("10.0.0.1", 503)
+	if s := state(); s.ReqStreak != 1 || s.Status != Healthy {
+		t.Fatalf("after 1 hit: streak=%d status=%v, want streak 1 Healthy (below threshold)", s.ReqStreak, s.Status)
+	}
+	mon.ReportOutcome("10.0.0.1", 503)
+	if s := state(); s.ReqStreak != 2 {
+		t.Fatalf("after 2 hits: streak=%d, want 2", s.ReqStreak)
+	}
+	mon.ReportOutcome("10.0.0.1", 503)
+	s := state()
+	if s.ReqStreak != 3 || s.Status != Degraded {
+		t.Fatalf("after 3 hits: streak=%d status=%v, want streak 3 Degraded", s.ReqStreak, s.Status)
+	}
+
+	// A successful outcome clears immediately.
+	mon.ReportOutcome("10.0.0.1", 200)
+	if s := state(); s.ReqStreak != 0 || s.Status != Healthy {
+		t.Fatalf("after success: streak=%d status=%v, want 0 Healthy", s.ReqStreak, s.Status)
+	}
+}
+
+func TestReportOutcomeClearOnNon5xx(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.2", Name: "n"}},
+	}
+	mon := NewMonitor(cfg)
+	mon.ReportOutcome("10.0.0.2", 503)
+	mon.ReportOutcome("10.0.0.2", 503)
+	mon.ReportOutcome("10.0.0.2", 429) // 429 is a success for this signal
+	if s := mon.GetNodeStates()[0]; s.ReqStreak != 0 {
+		t.Fatalf("429 must clear the streak, got %d", s.ReqStreak)
+	}
+}
+
+func TestReportOutcomeStaleHitStartsFreshStreak(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.3", Name: "n"}},
+	}
+	mon := NewMonitor(cfg)
+	mon.mu.Lock()
+	node := mon.nodes["10.0.0.3"]
+	node.ReqStreak = 5
+	node.ReqLastHit = time.Now().Add(-overloadRecoveryTTL - time.Second)
+	mon.mu.Unlock()
+
+	mon.ReportOutcome("10.0.0.3", 503)
+	s := mon.GetNodeStates()[0]
+	if s.ReqStreak != 1 {
+		t.Fatalf("hit after stale streak must restart at 1, got %d", s.ReqStreak)
+	}
+}
+
+func TestReportOutcomeUnknownIPIgnored(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.4", Name: "n"}},
+	}
+	mon := NewMonitor(cfg)
+	mon.ReportOutcome("10.9.9.9", 503) // must not panic
+}
+
+func TestRequestElevationNeverDeadAndIgnoresProbeDegraded(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 2},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.5", Name: "n"}},
+	}
+	mon := NewMonitor(cfg)
+
+	// Probe views: 2 failing checks => Dead. ReportOutcome must not resurrect.
+	mon.mu.Lock()
+	node := mon.nodes["10.0.0.5"]
+	node.ConsecutiveFailures = 2 // => Dead via computeStatus(2, 2)
+	node.Status = Dead
+	mon.mu.Unlock()
+	mon.ReportOutcome("10.0.0.5", 503)
+	mon.ReportOutcome("10.0.0.5", 503)
+	mon.ReportOutcome("10.0.0.5", 503)
+	if s := mon.GetNodeStates()[0]; s.Status != Dead {
+		t.Fatalf("probe Dead must not be resurrected to anything else, got %v", s.Status)
+	}
+
+	// Probe view: Degraded (1 failure with threshold 2). Elevation keeps Degraded.
+	mon.mu.Lock()
+	node = mon.nodes["10.0.0.5"]
+	node.ConsecutiveFailures = 1
+	node.Status = Degraded
+	mon.mu.Unlock()
+	if s := mon.GetNodeStates()[0]; s.Status != Degraded {
+		t.Fatalf("probe Degraded must stay Degraded, got %v", s.Status)
+	}
+}
+
+func TestReqStreakDecayAcrossReads(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.6", Name: "n"}},
+	}
+	mon := NewMonitor(cfg)
+	mon.mu.Lock()
+	node := mon.nodes["10.0.0.6"]
+	node.ReqStreak = 3
+	node.ReqLastHit = time.Now().Add(-overloadRecoveryTTL - time.Second) // stale
+	mon.mu.Unlock()
+
+	s := mon.GetNodeStates()[0]
+	if s.Status != Healthy {
+		t.Fatalf("stale streak must not elevate; got status %v (streak %d)", s.Status, s.ReqStreak)
+	}
+	// The streak itself is left intact (read-only decay); elevation is what
+	// expires. A subsequent hit restarts it at 1 (tested elsewhere).
+	if s.ReqStreak != 3 {
+		t.Fatalf("read-time decay must not mutate the stored streak, got %d", s.ReqStreak)
+	}
+}
+
+func TestReportOutcomeCarriedOverReload(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3, RequestOverloadThresholdValue: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.7", Name: "n"}},
+	}
+	mon := NewMonitor(cfg)
+	mon.ReportOutcome("10.0.0.7", 503)
+	mon.ReportOutcome("10.0.0.7", 503)
+	mon.ReportOutcome("10.0.0.7", 503)
+	prev := mon.GetNodeStates()
+
+	cfg2 := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3, RequestOverloadThresholdValue: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.7", Name: "n"}},
+	}
+	mon2 := NewMonitorWithState(cfg2, prev)
+	s := mon2.GetNodeStates()[0]
+	if s.ReqStreak != 3 {
+		t.Fatalf("reload must carry ReqStreak, got %d", s.ReqStreak)
+	}
+	if !s.RequestElevated(time.Now(), 3, overloadRecoveryTTL) {
+		t.Fatal("carried streak must still elevate")
+	}
+}
+
+func TestReportOutcomeConcurrentWithReads(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{HealthInterval: time.Second, HealthFailThreshold: 3},
+		Nodes:   []config.NodeConfig{{IP: "10.0.0.8", Name: "n"}},
+	}
+	mon := NewMonitor(cfg)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			mon.ReportOutcome("10.0.0.8", 503)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			_ = mon.GetNodeStates()
+		}
+	}()
+	wg.Wait()
+	// Race detector is the assertion; also check sanity.
+	if s := mon.GetNodeStates()[0]; s.ReqStreak < 1 {
+		t.Fatalf("streak should reflect hits, got %d", s.ReqStreak)
+	}
+}

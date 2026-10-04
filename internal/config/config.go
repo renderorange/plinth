@@ -21,12 +21,13 @@ type ClusterConfig struct {
 }
 
 type GatewayConfig struct {
-	Listen                   string
-	MetricsListen            string
-	HealthInterval           time.Duration
-	HealthFailThreshold      int
-	MaxBufferedResponseBytes int64
-	MaxRequestBodyBytes      int64
+	Listen                        string
+	MetricsListen                 string
+	HealthInterval                time.Duration
+	HealthFailThreshold           int
+	MaxBufferedResponseBytes      int64
+	MaxRequestBodyBytes           int64
+	RequestOverloadThresholdValue int
 }
 
 // ResponseBufferLimit returns the effective max buffered upstream response
@@ -51,6 +52,16 @@ func (g GatewayConfig) RequestBodyLimit() int64 {
 		return defaultMaxRequestBodyBytes
 	}
 	return g.MaxRequestBodyBytes
+}
+
+// RequestOverloadThreshold returns the effective consecutive request-level 5xx
+// count that changes a node's served status from Healthy to Degraded. 0 means
+// "use the default".
+func (g GatewayConfig) RequestOverloadThreshold() int {
+	if g.RequestOverloadThresholdValue <= 0 {
+		return defaultRequestOverloadThreshold
+	}
+	return g.RequestOverloadThresholdValue
 }
 
 type NodeConfig struct {
@@ -100,6 +111,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.MaxRequestBodyBytes == 0 {
 		c.Gateway.MaxRequestBodyBytes = defaultMaxRequestBodyBytes
+	}
+	if c.Gateway.RequestOverloadThresholdValue < 0 {
+		return fmt.Errorf("request_overload_threshold must be non-negative (0 uses the default)")
+	}
+	if c.Gateway.RequestOverloadThresholdValue == 0 {
+		c.Gateway.RequestOverloadThresholdValue = defaultRequestOverloadThreshold
 	}
 	if len(c.Nodes) == 0 {
 		return fmt.Errorf("at least one node must be configured")

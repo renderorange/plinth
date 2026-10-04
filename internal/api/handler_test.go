@@ -197,6 +197,30 @@ func TestHealthEndpointJSONStructure(t *testing.T) {
 	if _, ok := resp["healthy"]; !ok {
 		t.Error("response missing healthy field")
 	}
+
+	// A fresh node (never served a request) must expose req_streak as 0.
+	h2, _ := newTestHandlerWithBackend("http://127.0.0.1:8000")
+	req2 := httptest.NewRequest("GET", "/health", nil)
+	w2 := httptest.NewRecorder()
+	h2.ServeHTTP(w2, req2)
+	var resp2 map[string]interface{}
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	details, ok := resp2["details"].([]interface{})
+	if !ok || len(details) == 0 {
+		t.Fatal("response missing details array")
+	}
+	entry, ok := details[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("details[0] is not an object")
+	}
+	if _, ok := entry["req_streak"]; !ok {
+		t.Error("details entry missing req_streak field")
+	}
+	if entry["req_streak"] != float64(0) {
+		t.Errorf("req_streak = %v, want 0 for a fresh node", entry["req_streak"])
+	}
 }
 
 func TestModelsEndpointStructure(t *testing.T) {
@@ -2151,4 +2175,241 @@ func TestHealthEndpointLegacyFieldsUnchanged(t *testing.T) {
 	if _, ok := resp["details"]; !ok {
 		t.Error("missing details")
 	}
+}
+
+func newFakeVLLM(t *testing.T, ip string, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	l, err := net.Listen("tcp4", ip+":0")
+	if err != nil {
+		t.Fatalf("listen on %s: %v", ip, err)
+	}
+	srv := httptest.NewUnstartedServer(handler)
+	srv.Listener = l
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestProxyToVLLM503ElevatesNodeAndHealthReflectsIt(t *testing.T) {
+	vllmA := newFakeVLLM(t, "127.0.0.1", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"engine busy"}`))
+	}))
+	vllmB := newFakeVLLM(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"1","object":"text_completion","created":1,"model":"test/model","choices":[{"index":0,"text":"ok","finish_reason":"stop"}]}`))
+	}))
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			HealthInterval:                100 * time.Millisecond,
+			HealthFailThreshold:           3,
+			RequestOverloadThresholdValue: 3,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "a", VLLMPort: extractPort(t, vllmA.URL)},
+			{IP: "127.0.0.2", Name: "b", VLLMPort: extractPort(t, vllmB.URL)},
+		},
+		Models: config.ModelsConfig{
+			Default:   "test/model",
+			Available: []config.ModelConfig{{Name: "test/model", PipelineStages: 1}},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	h := NewHandler(cfg, mon, balancer.New())
+
+	body := `{"model":"test/model","prompt":"hi","max_tokens":1}`
+	do := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	healthJSON := func() map[string]interface{} {
+		req := httptest.NewRequest("GET", "/health", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		var out map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("health JSON: %v", err)
+		}
+		return out
+	}
+
+	// Round-robin alternates a,b. Three hits land on A after six requests;
+	// A's streak reaches 3 and its served status must read degraded.
+	for i := 0; i < 6; i++ {
+		w := do()
+		if i%2 == 0 && w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("request %d to node A: code = %d, want 503", i, w.Code)
+		}
+	}
+	waitForConditionProxy(t, 2*time.Second, "node A degraded on /health", func() bool {
+		out := healthJSON()
+		details, ok := out["details"].([]interface{})
+		if !ok {
+			return false
+		}
+		for _, d := range details {
+			nd := d.(map[string]interface{})
+			if nd["name"] == "a" {
+				return nd["status"] == "degraded" && nd["req_streak"].(float64) == 3
+			}
+		}
+		return false
+	})
+
+	// All subsequent requests must be served by B (healthy A still degraded).
+	for i := 0; i < 4; i++ {
+		if w := do(); w.Code != http.StatusOK {
+			t.Fatalf("post-elevation request %d: code = %d, want 200 from B", i, w.Code)
+		}
+	}
+}
+
+func waitForConditionProxy(t *testing.T, timeout time.Duration, desc string, check func() bool) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		if check() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", desc)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+// Streaming site: a 503 on a stream:true request is a status-bearing, err==nil
+// attempt; the gateway must feed it to the monitor before any chunk commits.
+func TestProxyToVLLMStreaming503ElevatesNode(t *testing.T) {
+	vllmA := newFakeVLLM(t, "127.0.0.1", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"engine busy"}`))
+	}))
+	vllmB := newFakeVLLM(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test/model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"))
+	}))
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			HealthInterval:                100 * time.Millisecond,
+			HealthFailThreshold:           3,
+			RequestOverloadThresholdValue: 3,
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "a", VLLMPort: extractPort(t, vllmA.URL)},
+			{IP: "127.0.0.2", Name: "b", VLLMPort: extractPort(t, vllmB.URL)},
+		},
+		Models: config.ModelsConfig{
+			Default:   "test/model",
+			Available: []config.ModelConfig{{Name: "test/model", PipelineStages: 1}},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	h := NewHandler(cfg, mon, balancer.New())
+
+	body := `{"model":"test/model","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	do := func() { // 6 requests: 3 land on A (503), 3 on B (200 stream)
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+	}
+	for i := 0; i < 6; i++ {
+		do()
+	}
+	waitForConditionProxy(t, 2*time.Second, "node A distributed degraded via streaming 503s", func() bool {
+		req := httptest.NewRequest("GET", "/health", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		var out map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			return false
+		}
+		details, ok := out["details"].([]interface{})
+		if !ok {
+			return false
+		}
+		for _, d := range details {
+			nd := d.(map[string]interface{})
+			if nd["name"] == "a" {
+				return nd["status"] == "degraded" && nd["req_streak"].(float64) == 3
+			}
+		}
+		return false
+	})
+}
+
+// Committed site: an oversized 503 body is committed to the client (pass-through
+// path); the gateway must still report the status to the monitor.
+func TestProxyToVLLMCommitted503ElevatesNode(t *testing.T) {
+	big := []byte(`{"error":"engine busy","detail":"` + strings.Repeat("x", 4096) + `"}`)
+	vllmA := newFakeVLLM(t, "127.0.0.1", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write(big) // 4 KiB, over the 1 KiB buffer limit below
+	}))
+	vllmB := newFakeVLLM(t, "127.0.0.2", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"1","object":"text_completion","created":1,"model":"test/model","choices":[{"index":0,"text":"ok","finish_reason":"stop"}]}`))
+	}))
+
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			HealthInterval:                100 * time.Millisecond,
+			HealthFailThreshold:           3,
+			RequestOverloadThresholdValue: 3,
+			MaxBufferedResponseBytes:      1024, // force pass-through commit above this
+		},
+		Nodes: []config.NodeConfig{
+			{IP: "127.0.0.1", Name: "a", VLLMPort: extractPort(t, vllmA.URL)},
+			{IP: "127.0.0.2", Name: "b", VLLMPort: extractPort(t, vllmB.URL)},
+		},
+		Models: config.ModelsConfig{
+			Default:   "test/model",
+			Available: []config.ModelConfig{{Name: "test/model", PipelineStages: 1}},
+		},
+	}
+	mon := health.NewMonitor(cfg)
+	h := NewHandler(cfg, mon, balancer.New())
+
+	// Warm up: Teach the health state that these nodes are fine without a live probe.
+	// (The monitor is NOT Started — same isolation rationale as Task 4; nodes start Healthy.)
+	body := `{"model":"test/model","prompt":"hi","max_tokens":1}`
+	do := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	for i := 0; i < 6; i++ {
+		if w := do(); i%2 == 0 && w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("request %d to node A: code = %d, want 503", i, w.Code)
+		}
+	}
+	waitForConditionProxy(t, 2*time.Second, "node A degraded via committed oversized 503s", func() bool {
+		req := httptest.NewRequest("GET", "/health", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		var out map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			return false
+		}
+		details, ok := out["details"].([]interface{})
+		if !ok {
+			return false
+		}
+		for _, d := range details {
+			nd := d.(map[string]interface{})
+			if nd["name"] == "a" {
+				return nd["status"] == "degraded" && nd["req_streak"].(float64) == 3
+			}
+		}
+		return false
+	})
 }

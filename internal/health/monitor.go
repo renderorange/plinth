@@ -15,6 +15,12 @@ import (
 	"plinth/internal/metrics"
 )
 
+// overloadRecoveryTTL bounds how long an untouched request-streak elevates a
+// node. The monitor never sees traffic for a drained node, so recovery must
+// not depend on receiving a request; the streak decays at read time once it
+// has not been hit for this long.
+const overloadRecoveryTTL = 10 * time.Second
+
 type Monitor struct {
 	cfg            *config.Config
 	client         *http.Client
@@ -67,6 +73,8 @@ func NewMonitorWithState(cfg *config.Config, prev []NodeState) *Monitor {
 		if old, ok := prevByIP[ip]; ok {
 			n.Status = old.Status
 			n.ConsecutiveFailures = old.ConsecutiveFailures
+			n.ReqStreak = old.ReqStreak
+			n.ReqLastHit = old.ReqLastHit
 			n.Models = old.Models.Clone()
 		}
 	}
@@ -91,8 +99,15 @@ func (m *Monitor) GetNodeStates() []NodeState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	states := make([]NodeState, 0, len(m.nodes))
+	now := time.Now()
 	for _, n := range m.nodes {
-		states = append(states, n.Clone())
+		s := n.Clone()
+		// Request elevation caps at Degraded and never overrides a probe
+		// verdict: a 503 is a traffic signal, only probes may declare death.
+		if s.Status == Healthy && s.RequestElevated(now, m.cfg.Gateway.RequestOverloadThreshold(), overloadRecoveryTTL) {
+			s.Status = Degraded
+		}
+		states = append(states, s)
 	}
 	sort.Slice(states, func(i, j int) bool {
 		return states[i].IP < states[j].IP
@@ -118,6 +133,31 @@ func (m *Monitor) Recheck(ip string) {
 		return
 	}
 	go m.runCheck(nc)
+}
+
+// ReportOutcome records the HTTP status of one proxied attempt against a
+// node. status >= 500 is a request-level failure ("the node said no"); any
+// other status proves the node served the request and clears the streak.
+// The caller does not use the return value; reports are serialized under the
+// monitor lock. No-op for unknown IPs. Transport failures (no status) are
+// handled by the connection-failure path and must not be reported here.
+func (m *Monitor) ReportOutcome(ip string, status int) {
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	node, ok := m.nodes[ip]
+	if !ok {
+		return
+	}
+	if status >= 500 {
+		if node.ReqLastHit.IsZero() || now.Sub(node.ReqLastHit) > overloadRecoveryTTL {
+			node.ReqStreak = 0
+		}
+		node.ReqStreak++
+		node.ReqLastHit = now
+		return
+	}
+	node.ReqStreak = 0
 }
 
 func (m *Monitor) loop() {
