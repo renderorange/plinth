@@ -136,8 +136,16 @@ type NodeState struct {
 	Status              Status
 	LastCheck           time.Time
 	ConsecutiveFailures int
-	GPUs                []GPUMetrics
-	Models              ModelDiscovery
+	// ReqStreak is the consecutive request-level 5xx outcomes (ReportOutcome
+	// hits) observed for this node. It drives request elevation: a streak of
+	// requestOverloadThreshold or more changes the served status to Degraded
+	// until the streak clears (Task 3) or decays (time-based, read-evaluated).
+	ReqStreak int
+	// ReqLastHit is the time of the most recent streak increment. Together
+	// with ReqStreak it determines request elevation; see RequestElevated.
+	ReqLastHit time.Time
+	GPUs       []GPUMetrics
+	Models     ModelDiscovery
 }
 
 // Clone returns a deep copy of n. The returned value shares no slice backing
@@ -149,6 +157,17 @@ func (n NodeState) Clone() NodeState {
 	}
 	out.Models = n.Models.Clone()
 	return out
+}
+
+// RequestElevated reports whether n's request-outcome streak currently
+// elevates the node's served status to Degraded. Elevation caps at Degraded
+// and is bounded by ttl since the last hit: a drained node (no traffic to
+// clear the streak) recovers by not being hit again for ttl.
+func (n NodeState) RequestElevated(now time.Time, threshold int, ttl time.Duration) bool {
+	if n.ReqStreak < threshold {
+		return false
+	}
+	return !n.ReqLastHit.IsZero() && now.Sub(n.ReqLastHit) <= ttl
 }
 
 func computeStatus(consecutiveFailures, threshold int) Status {

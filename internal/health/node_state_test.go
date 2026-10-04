@@ -186,3 +186,29 @@ func TestNodeStateHasModels(t *testing.T) {
 		t.Errorf("zero NodeState Models.State = %v, want ModelsUntried", n.Models.State)
 	}
 }
+
+func TestRequestElevated(t *testing.T) {
+	now := time.Now()
+	ttl := 10 * time.Second
+	tests := []struct {
+		name      string
+		state     NodeState
+		threshold int
+		want      bool
+	}{
+		{"zero streak", NodeState{}, 3, false},
+		{"below threshold", NodeState{ReqStreak: 2, ReqLastHit: now}, 3, false},
+		{"at threshold", NodeState{ReqStreak: 3, ReqLastHit: now}, 3, true},
+		{"above threshold", NodeState{ReqStreak: 4, ReqLastHit: now}, 3, true},
+		{"no last hit", NodeState{ReqStreak: 5}, 3, false},
+		{"stale", NodeState{ReqStreak: 5, ReqLastHit: now.Add(-11 * time.Second)}, 3, false},
+		{"exactly ttl still elevated", NodeState{ReqStreak: 5, ReqLastHit: now.Add(-10 * time.Second)}, 3, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.state.RequestElevated(now, tt.threshold, ttl); got != tt.want {
+				t.Errorf("RequestElevated() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
